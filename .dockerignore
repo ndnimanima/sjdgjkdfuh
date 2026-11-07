@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+*.py[cod]
+data
+*.db
+*.db-shm
+*.db-wal
+node_modules
+docs/shots
+.wrangler
