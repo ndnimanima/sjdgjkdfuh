@@ -1,0 +1,31 @@
+# Replace the app name with a globally unique Fly.io app name before `fly deploy`.
+app = "rozaneh-v104-change-me"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATA_DIR = "/data"
+  DEFAULT_TZ = "Asia/Tehran"
+  COOKIE_SECURE = "1"
+  SCHEDULER_ENABLED = "1"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = "off" # Keep the scheduler alive.
+  min_machines_running = 1
+  processes = ["app"]
+
+[[mounts]]
+  source = "rozaneh_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

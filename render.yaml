@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: rozaneh
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: rozaneh-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: PORT
+        value: 8080
+      - key: DEFAULT_TZ
+        value: Asia/Tehran
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: SCHEDULER_ENABLED
+        value: "1"
+      - key: ADMIN_PASSWORD
+        sync: false

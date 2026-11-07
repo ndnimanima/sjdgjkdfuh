@@ -1,0 +1,18 @@
+name = "rozaneh-edge"
+main = "cloudflare/worker.js"
+compatibility_date = "2026-11-07"
+workers_dev = true
+
+[vars]
+# Deploy the FastAPI app to a persistent host first, then point this at its HTTPS URL.
+ROZANEH_ORIGIN = "https://replace-with-your-rozaneh-origin.example"
+LOG_EDGE_ACCESS = "0"
+
+# Optional privacy-minimal D1 request logging. Create the database with:
+#   npx wrangler d1 create rozaneh-edge
+# Then uncomment the binding below, fill in the returned database_id, and run:
+#   npx wrangler d1 execute rozaneh-edge --remote --file=cloudflare/schema.sql
+# [[d1_databases]]
+# binding = "EDGE_DB"
+# database_name = "rozaneh-edge"
+# database_id = "REPLACE_WITH_REAL_D1_DATABASE_ID"

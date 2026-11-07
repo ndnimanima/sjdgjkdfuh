@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="fa" dir="rtl" data-theme="slate">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ورود · Rozaneh</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <link rel="stylesheet" href="/assets/style.css?v=1.04"/>
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card form" id="loginForm" autocomplete="on">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <img src="/assets/logo.svg" alt="Rozaneh" width="44" height="44" style="border-radius:12px;box-shadow:0 6px 18px var(--brand-glow)"/>
+          <div>
+            <div style="font-weight:800;font-size:18px;letter-spacing:-.01em" id="appName">روزنه</div>
+            <div style="font-size:11.5px;color:var(--muted)" id="verTag">v1.04</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div class="theme-switch" id="themeToggle">
+            <button class="theme-dot" data-t="slate"   type="button" title="Aurora Dark"></button>
+            <button class="theme-dot" data-t="cyber"   type="button" title="Cyber Obsidian"></button>
+            <button class="theme-dot" data-t="emerald" type="button" title="Persian Emerald"></button>
+            <button class="theme-dot" data-t="amber"   type="button" title="Silk Daylight"></button>
+          </div>
+          <button class="btn btn-sm" type="button" id="langToggle">EN</button>
+        </div>
+      </div>
+
+      <div style="margin-top:4px">
+        <h1 style="font-size:18px;font-weight:800;margin:4px 0 4px" id="tTitle">ورود به پنل فرماندهی روزنه</h1>
+        <p style="font-size:12.5px;color:var(--muted);margin:0" id="tSub"></p>
+      </div>
+
+      <div class="field">
+        <label for="password" id="tPwd">گذرواژه مدیریت</label>
+        <input class="input" id="password" name="password" type="password" required autofocus placeholder="••••••••"/>
+      </div>
+
+      <div id="errBox" class="pill err" style="display:none;justify-content:center;padding:9px"></div>
+
+      <button class="btn btn-primary" type="submit" id="submitBtn" style="justify-content:center;padding:11px">
+        ورود به سیستم
+      </button>
+
+      <div id="hintBox" style="font-size:11.5px;color:var(--muted);text-align:center;display:none;padding:8px 10px;border-radius:10px;background:var(--surface-2)"></div>
+    </form>
+  </div>
+
+  <script src="/assets/i18n.js?v=1.04"></script>
+  <script>
+    (function () {
+      const DICT = window.ROZANEH_I18N;
+      let lang = localStorage.getItem("rz.lang") || "fa";
+      let theme = localStorage.getItem("rz.theme") || "slate";
+      const t = (k) => (DICT[lang] && DICT[lang][k]) || DICT.fa[k] || k;
+
+      function apply() {
+        document.documentElement.lang = lang;
+        document.documentElement.dir = lang === "fa" ? "rtl" : "ltr";
+        document.documentElement.dataset.theme = theme;
+        document.getElementById("appName").textContent = t("app.name");
+        document.getElementById("tTitle").textContent = t("login.title");
+        document.getElementById("tSub").textContent = t("login.sub");
+        document.getElementById("tPwd").textContent = t("login.password");
+        document.getElementById("submitBtn").textContent = t("login.submit");
+        document.getElementById("hintBox").textContent = t("login.hint");
+        document.getElementById("langToggle").textContent = t("top.lang");
+        document.querySelectorAll(".theme-dot").forEach((b) =>
+          b.classList.toggle("active", b.dataset.t === theme)
+        );
+      }
+
+      fetch("/api/meta").then((r) => r.json()).then((m) => {
+        if (m.authenticated) { location.href = "/"; return; }
+        document.getElementById("verTag").textContent = "v" + m.version;
+        if (!localStorage.getItem("rz.theme") && m.defaults) theme = m.defaults.theme;
+        if (!localStorage.getItem("rz.lang") && m.defaults) lang = m.defaults.language;
+        if (m.bootstrap_password) document.getElementById("hintBox").style.display = "block";
+        apply();
+      }).catch(apply);
+
+      document.getElementById("langToggle").onclick = () => {
+        lang = lang === "fa" ? "en" : "fa";
+        localStorage.setItem("rz.lang", lang);
+        apply();
+      };
+      document.getElementById("themeToggle").onclick = (e) => {
+        const b = e.target.closest("[data-t]");
+        if (!b) return;
+        theme = b.dataset.t;
+        localStorage.setItem("rz.theme", theme);
+        apply();
+      };
+
+      document.getElementById("loginForm").onsubmit = async (e) => {
+        e.preventDefault();
+        const err = document.getElementById("errBox");
+        err.style.display = "none";
+        const btn = document.getElementById("submitBtn");
+        btn.disabled = true;
+        try {
+          const r = await fetch("/api/login", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ password: document.getElementById("password").value })
+          });
+          if (!r.ok) {
+            err.textContent = t("login.wrong");
+            err.style.display = "flex";
+            return;
+          }
+          location.href = "/";
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      apply();
+    })();
+  </script>
+</body>
+</html>

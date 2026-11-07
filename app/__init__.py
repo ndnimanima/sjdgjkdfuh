@@ -1,0 +1,1 @@
+"""NewsRail application package."""
