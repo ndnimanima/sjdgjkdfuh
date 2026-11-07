@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check source syntax
+        run: |
+          python -m compileall -q app docs
+          node --check static/assets/app.js
+          node --check static/assets/i18n.js
+          node --input-type=module --check < cloudflare/worker.js
+          bash -n start.sh docker-entrypoint.sh
+
+      - name: Validate deployment configuration syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
+          import yaml
+          for name in ("docker-compose.yml", "render.yaml"):
+              yaml.safe_load(Path(name).read_text())
+          for name in ("fly.toml", "railway.toml", "wrangler.toml"):
+              tomllib.loads(Path(name).read_text())
+          print("YAML and TOML configuration parsed successfully")
+          PY
+
+      - name: Run isolated API smoke test
+        run: python docs/api_smoke.py
+
+      - name: Build Docker image
+        run: docker build --tag rozaneh:ci .
