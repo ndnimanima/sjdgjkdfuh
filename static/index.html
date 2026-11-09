@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>روزنه · Rozaneh</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
-  <link rel="stylesheet" href="/assets/style.css?v=1.04"/>
+  <link rel="stylesheet" href="/assets/style.css?v=1.06"/>
 </head>
 <body>
   <div class="app">
@@ -16,7 +16,7 @@
           <div class="brand-title" id="brandTitle">روزنه</div>
           <div class="brand-sub">
             <span>Rozaneh Studio</span>
-            <span class="ver-pill mono" id="verBadge">v1.04</span>
+            <span class="ver-pill mono" id="verBadge">v1.06</span>
           </div>
         </div>
       </div>
@@ -29,7 +29,7 @@
           <span id="liveTxt">موتور زمان‌بندی فعال</span>
         </div>
         <div class="side-actions">
-          <span class="mono" id="verFoot">v1.04</span>
+          <span class="mono" id="verFoot">v1.06</span>
           <button class="btn btn-sm btn-ghost" id="logoutBtn" type="button">خروج</button>
         </div>
       </div>
@@ -44,11 +44,16 @@
         </div>
         <div class="top-tools">
           <button class="btn btn-sm btn-primary" id="quickAnalyzeBtn" type="button">✨ تحلیل لینک</button>
-          <div class="theme-switch" id="themeSwitch" role="group" aria-label="Theme">
-            <button class="theme-dot" data-t="slate"   type="button" title="Aurora Dark · شفق تیره"></button>
-            <button class="theme-dot" data-t="cyber"   type="button" title="Cyber Obsidian · نئون سایبری"></button>
-            <button class="theme-dot" data-t="emerald" type="button" title="Persian Emerald · زمرد پارسی"></button>
-            <button class="theme-dot" data-t="amber"   type="button" title="Silk Daylight · روزنه روشن"></button>
+          <div class="theme-switch" id="themeSwitch">
+            <button class="btn btn-sm theme-trigger" id="themeToggle" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Choose theme" title="Choose theme">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 1.5-3.3 1.9 1.9 0 0 1 1.5-3.1h.8A4 4 0 0 0 21 10.7 7.7 7.7 0 0 0 12 3z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7.5" r="1"/><circle cx="15" cy="8" r="1"/></svg>
+            </button>
+            <div class="theme-popover" id="themePopover" role="group" aria-label="Choose theme" hidden>
+              <button class="theme-choice" data-t="slate" type="button" title="Aurora Dark · شفق تیره"><span class="theme-dot"></span><span>Aurora</span></button>
+              <button class="theme-choice" data-t="cyber" type="button" title="Cyber Obsidian · نئون سایبری"><span class="theme-dot"></span><span>Cyber</span></button>
+              <button class="theme-choice" data-t="emerald" type="button" title="Persian Emerald · زمرد پارسی"><span class="theme-dot"></span><span>Emerald</span></button>
+              <button class="theme-choice" data-t="amber" type="button" title="Silk Daylight · روزنه روشن"><span class="theme-dot"></span><span>Silk</span></button>
+            </div>
           </div>
           <button class="btn btn-sm" id="langBtn" type="button">EN</button>
           <button class="btn btn-sm" id="refreshBtn" type="button">↻</button>
@@ -64,7 +69,7 @@
   <div id="modalRoot"></div>
   <div class="toasts" id="toastRoot"></div>
 
-  <script src="/assets/i18n.js?v=1.04"></script>
-  <script src="/assets/app.js?v=1.04"></script>
+  <script src="/assets/i18n.js?v=1.06"></script>
+  <script src="/assets/app.js?v=1.06"></script>
 </body>
 </html>

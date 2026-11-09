@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).expanduser()
 DB_PATH = DATA_DIR / "rozaneh.db"
-ARCHIVE_FIXTURE_HASH = "smoke-ui-v104-archive-fixture"
+ARCHIVE_FIXTURE_HASH = "smoke-ui-v106-archive-fixture"
 BASE = "http://127.0.0.1:8080"
 
 
@@ -23,7 +23,7 @@ def seed_archive_fixture():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     summary = (
-        "Synthetic article content created by the Rozaneh v1.04 browser smoke test. "
+        "Synthetic article content created by the Rozaneh v1.06 browser smoke test. "
         "This fixture exercises archive filtering, safe message rendering, and the "
         "preview modal without downloading a feed, contacting a publisher, or posting anywhere."
     )

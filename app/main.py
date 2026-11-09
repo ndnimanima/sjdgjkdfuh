@@ -1,4 +1,4 @@
-"""Rozaneh — FastAPI application: panel API + SPA host (v1.04)."""
+"""Rozaneh — FastAPI application: panel API + SPA host (v1.06)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -52,9 +53,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+config.GENERATED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 if config.STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
     app.mount("/assets", StaticFiles(directory=str(config.STATIC_DIR / "assets")), name="assets")
+    app.mount("/media/generated", StaticFiles(directory=str(config.GENERATED_IMAGES_DIR)), name="generated_images")
 
 auth = Depends(security.require_auth)
 
@@ -186,6 +189,13 @@ class SettingsPayload(BaseModel):
     openai_base_url: str | None = None
     openai_model: str | None = None
     openai_api_key: str | None = None
+    analysis_api_base_url: str | None = None
+    analysis_api_model: str | None = None
+    analysis_api_key: str | None = None
+    image_generation_enabled: int | bool | None = None
+    image_api_base_url: str | None = None
+    image_api_model: str | None = None
+    image_api_key: str | None = None
     global_footer: str | None = None
     max_message_chars: str | int | None = None
     signature_enabled: int | bool | None = None
@@ -349,17 +359,27 @@ def clean_schedule(value: str | list[str] | None) -> str:
     return db.dump(sorted(cleaned))
 
 
-SECRET_SETTINGS = {"password_hash", "password_salt", "deepseek_api_key", "openai_api_key"}
+SECRET_SETTINGS = {
+    "password_hash", "password_salt", "deepseek_api_key", "openai_api_key",
+    "analysis_api_key", "image_api_key",
+}
 
 
 def settings_public() -> dict:
     data = db.all_settings()
     for key in SECRET_SETTINGS:
         data.pop(key, None)
-    data["deepseek_api_key"] = mask_secret(db.get_setting("deepseek_api_key"))
-    data["openai_api_key"] = mask_secret(db.get_setting("openai_api_key"))
-    data["deepseek_key_set"] = bool(db.get_setting("deepseek_api_key"))
-    data["openai_key_set"] = bool(db.get_setting("openai_api_key"))
+    key_flags = {
+        "deepseek_api_key": "deepseek_key_set",
+        "openai_api_key": "openai_key_set",
+        "analysis_api_key": "analysis_api_key_set",
+        "image_api_key": "image_api_key_set",
+    }
+    for key, flag in key_flags.items():
+        # Never send credential fragments back to the browser; the boolean flag
+        # and input placeholder indicate whether a key is already configured.
+        data[key] = ""
+        data[flag] = bool(db.get_setting(key))
     data["password_is_bootstrap"] = security.password_is_bootstrap()
     return data
 
@@ -493,13 +513,20 @@ async def get_settings(_: None = auth) -> dict:
 async def patch_settings(payload: SettingsPayload, _: None = auth) -> dict:
     data = payload.model_dump(exclude_unset=True)
 
-    for secret_key in ("deepseek_api_key", "openai_api_key"):
+    for secret_key in ("deepseek_api_key", "openai_api_key", "analysis_api_key", "image_api_key"):
         if secret_key in data:
             value = (data.pop(secret_key) or "").strip()
             if value and "•" not in value:
                 db.set_setting(secret_key, value)
             elif not value:
                 db.set_setting(secret_key, "")
+
+    for url_key in ("analysis_api_base_url", "image_api_base_url"):
+        if data.get(url_key):
+            parsed = urlparse(str(data[url_key]).strip())
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                fail("url_invalid")
+            data[url_key] = str(data[url_key]).strip().rstrip("/")
 
     if data.get("timezone"):
         from zoneinfo import ZoneInfo
@@ -514,7 +541,7 @@ async def patch_settings(payload: SettingsPayload, _: None = auth) -> dict:
     if data.get("language") and data["language"] not in {l["id"] for l in config.LANGUAGES}:
         fail("language_invalid")
 
-    flags = {"translate_post_edit", "translate_preserve", "signature_enabled"}
+    flags = {"translate_post_edit", "translate_preserve", "signature_enabled", "image_generation_enabled"}
     for key, value in data.items():
         if key in flags:
             db.set_setting(key, str(as_int(value)))
@@ -530,10 +557,8 @@ async def get_creators(_: None = auth) -> dict:
 
 @app.patch("/api/creators")
 async def patch_creators(payload: CreatorsPayload, _: None = auth) -> dict:
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        if value is not None:
-            db.set_setting(key, str(value).strip())
-    return {"ok": True, "creators": creators_public(), "edu": edu_public()}
+    # Team profiles are release metadata; ordinary panel users must not edit them.
+    fail("creators_read_only", 403)
 
 
 # ── feeds ───────────────────────────────────────────────────────────────────
@@ -644,6 +669,25 @@ async def delete_feed(feed_id: int, _: None = auth) -> dict:
     return {"ok": True}
 
 
+async def _validated_recent_items(items: list[dict], hours: int = 24, limit: int = 12) -> list[dict]:
+    """Verify recent feed timestamps against canonical article metadata when available."""
+    candidates = [item for item in items if feeds.within_window(item, hours, allow_missing=True)][:limit]
+    sem = asyncio.Semaphore(4)
+
+    async def inspect(item: dict) -> None:
+        link = (item.get("link") or "").strip()
+        if not link:
+            return
+        async with sem:
+            info = await feeds.enrich_article(link)
+        article_date = feeds.normalize_publication_date(info.get("published"))
+        if article_date:
+            item["published"] = article_date
+
+    await asyncio.gather(*(inspect(item) for item in candidates))
+    return [item for item in candidates if feeds.within_window(item, hours)]
+
+
 @app.post("/api/feeds/test")
 async def test_feed(payload: FeedPayload, _: None = auth) -> dict:
     url = (payload.url or "").strip()
@@ -653,7 +697,7 @@ async def test_feed(payload: FeedPayload, _: None = auth) -> dict:
         items = await feeds.fetch_source({"url": url, "title": "test"})
     except feeds.FeedError as exc:
         return {"ok": False, "error": str(exc)}
-    window = [it for it in items if feeds.within_window(it, 24)]
+    window = await _validated_recent_items(items, 24, 12)
     return {
         "ok": True,
         "total": len(items),
@@ -679,20 +723,25 @@ async def check_feed(feed_id: int, _: None = auth) -> dict:
     try:
         items = await feeds.fetch_source(feed)
     except feeds.FeedError as exc:
+        checked_at = db.now_iso()
         db.execute(
             "UPDATE feeds SET last_checked = ?, last_status = ? WHERE id = ?",
-            (db.now_iso(), f"error: {exc}"[:200], feed_id),
+            (checked_at, f"error: {exc}"[:200], feed_id),
         )
-        return {"ok": False, "error": str(exc)}
-    window = [it for it in items if feeds.within_window(it, 24)]
+        updated = db.query_one("SELECT * FROM feeds WHERE id = ?", (feed_id,))
+        return {"ok": False, "error": str(exc), "feed": feed_public(updated) if updated else None}
+    window = await _validated_recent_items(items, 24, 12)
+    checked_at = db.now_iso()
     db.execute(
         "UPDATE feeds SET last_checked = ?, last_status = ?, last_count = ? WHERE id = ?",
-        (db.now_iso(), "ok", len(window), feed_id),
+        (checked_at, "ok", len(window), feed_id),
     )
+    updated = db.query_one("SELECT * FROM feeds WHERE id = ?", (feed_id,))
     return {
         "ok": True,
         "total": len(items),
         "in_window": len(window),
+        "feed": feed_public(updated) if updated else None,
         "samples": [{"title": it["title"], "published": it["published"]} for it in window[:5]],
     }
 
@@ -845,7 +894,8 @@ async def verify_destination(destination_id: int, _: None = auth) -> dict:
         "UPDATE destinations SET last_test_at = ?, last_test_ok = ?, last_test_msg = ? WHERE id = ?",
         (db.now_iso(), 1 if ok else 0, (detail if ok else f"verify:{detail}")[:300], destination_id),
     )
-    return {"ok": ok, "detail": detail, "info": info}
+    updated = db.query_one("SELECT * FROM destinations WHERE id = ?", (destination_id,))
+    return {"ok": ok, "detail": detail, "info": info, "destination": destination_public(updated) if updated else None}
 
 
 @app.post("/api/destinations/{destination_id}/test")
@@ -858,7 +908,8 @@ async def test_destination(destination_id: int, _: None = auth) -> dict:
         "UPDATE destinations SET last_test_at = ?, last_test_ok = ?, last_test_msg = ? WHERE id = ?",
         (db.now_iso(), 1 if ok else 0, detail[:300], destination_id),
     )
-    return {"ok": ok, "detail": detail}
+    updated = db.query_one("SELECT * FROM destinations WHERE id = ?", (destination_id,))
+    return {"ok": ok, "detail": detail, "destination": destination_public(updated) if updated else None}
 
 
 # ── jobs ────────────────────────────────────────────────────────────────────
@@ -973,6 +1024,11 @@ async def job_logs(job_id: int, limit: int = 60, _: None = auth) -> dict:
 @app.get("/api/analyzer")
 async def list_analyses(limit: int = 40, _: None = auth) -> dict:
     return {"analyses": analyzer.list_analyses(limit=limit)}
+
+
+@app.post("/api/analyzer/llm/test")
+async def test_analyzer_llm(_: None = auth) -> dict:
+    return await analyzer.test_llm_connection()
 
 
 @app.post("/api/analyzer")
@@ -1315,7 +1371,7 @@ async def admin_import(payload: ImportPayload, _: None = auth) -> dict:
             imported["jobs"] += 1
     if isinstance(data.get("settings"), dict):
         for key, value in data["settings"].items():
-            if key in SECRET_SETTINGS:
+            if key in SECRET_SETTINGS or key.startswith(("creator1_", "creator2_", "edu_")):
                 continue
             db.set_setting(key, str(value))
     db.log(None, "settings imported", level="admin", code="import_done")

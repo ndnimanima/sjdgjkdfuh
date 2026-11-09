@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rozaneh:1.04
+    image: rozaneh:1.06
     container_name: rozaneh
     restart: unless-stopped
     env_file:

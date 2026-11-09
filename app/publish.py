@@ -14,7 +14,9 @@ import html
 import io
 import re
 import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -274,10 +276,23 @@ def _parse_mode(destination: dict) -> str | None:
 
 
 async def fetch_image(url: str) -> tuple[bytes, str, str] | None:
-    """Download an article image, reject tiny icons/logo strips, convert WebP→JPEG."""
-    if not url or not url.startswith(("http://", "https://")):
+    """Load a source image or persistent generated asset; reject logos/tiny files."""
+    if not url:
         return None
-    if feeds.is_logo_or_junk(url):
+    parsed = urlparse(url)
+    if parsed.path.startswith("/media/generated/"):
+        name = Path(parsed.path).name
+        if not re.fullmatch(r"ai_[0-9a-f]{24}\.jpg", name):
+            return None
+        path = config.GENERATED_IMAGES_DIR / name
+        try:
+            data = path.read_bytes()
+            if 1500 <= len(data) <= MAX_IMAGE_BYTES:
+                return data, name, "image/jpeg"
+        except OSError:
+            return None
+        return None
+    if not url.startswith(("http://", "https://")) or feeds.is_logo_or_junk(url):
         return None
     try:
         async with _client() as client:
@@ -647,6 +662,53 @@ def _use_html(destination: dict) -> bool:
     return _parse_mode(destination) == "HTML"
 
 
+def _generated_image_label(item: dict) -> str:
+    image_path = urlparse(str(item.get("image") or "")).path
+    if not image_path.startswith("/media/generated/ai_"):
+        return ""
+    return "🖼️ AI-generated editorial illustration" if str(item.get("lang") or "").startswith("en") else "🖼️ تصویر تولیدشده با هوش مصنوعی"
+
+
+def _body_overhead(item: dict, destination: dict, with_signature: bool | None = None) -> int:
+    """Estimate the visible non-body text so a summary can be authored to fit."""
+    if with_signature is None:
+        with_signature = _signature_enabled()
+    use_html = _use_html(destination)
+    title = (item.get("title_fa") or item.get("title") or "").strip()
+    show_topic = int(item.get("show_topic", 1)) != 0
+    topic = (item.get("topic") or "").strip() if show_topic else ""
+    show_source = bool(int(item.get("show_source") or 0))
+    link = (item.get("link") or "").strip()
+    source_label = (item.get("custom_source_label") or item.get("feed_title") or "منبع خبر").strip()
+    footer = (destination.get("footer") or "").strip() if with_signature else ""
+    global_footer = (db.get_setting("global_footer") or "").strip() if with_signature else ""
+
+    tail_plain_parts: list[str] = []
+    image_label = _generated_image_label(item)
+    if image_label:
+        tail_plain_parts.append(image_label)
+    if topic:
+        tail_plain_parts.append(topic)
+    if footer:
+        tail_plain_parts.append(footer if use_html else f"— {footer}")
+    if global_footer and global_footer != footer:
+        tail_plain_parts.append(global_footer)
+    if show_source and link:
+        tail_plain_parts.append(f"🔗 منبع: {source_label}" if use_html else f"🔗 منبع ({source_label}): {link}")
+    return len(title) + sum(len(p) for p in tail_plain_parts) + (len(tail_plain_parts) + 2) * 2 + 8
+
+
+def body_budget(
+    item: dict,
+    destination: dict,
+    kind: str = "text",
+    with_signature: bool | None = None,
+) -> int:
+    """Available visible characters for the body within a text post or photo caption."""
+    platform = (destination.get("platform") or "telegram").lower()
+    return max(0, platform_limit(platform, kind) - _body_overhead(item, destination, with_signature))
+
+
 def _build_message(
     item: dict,
     destination: dict,
@@ -676,19 +738,8 @@ def _build_message(
     footer = (destination.get("footer") or "").strip() if with_signature else ""
     global_footer = (db.get_setting("global_footer") or "").strip() if with_signature else ""
 
-    # Compute fixed visible character overhead first so body fits cleanly inside char_limit
-    tail_plain_parts: list[str] = []
-    if topic:
-        tail_plain_parts.append(topic)
-    if footer:
-        tail_plain_parts.append(footer if use_html else f"— {footer}")
-    if global_footer and global_footer != footer:
-        tail_plain_parts.append(global_footer)
-    if show_source and link:
-        tail_plain_parts.append(f"🔗 منبع: {source_label}" if use_html else f"🔗 منبع ({source_label}): {link}")
-
-    overhead = len(title) + sum(len(p) for p in tail_plain_parts) + (len(tail_plain_parts) + 2) * 2 + 8
-    body_budget = max(0, char_limit - overhead)
+    # Reserve the same fixed visible overhead used by body_budget().
+    body_budget = max(0, char_limit - _body_overhead(item, destination, with_signature))
     fitted_body = _truncate_clean(body, body_budget) if (body and body_budget >= 45) else ""
 
     if use_html:
@@ -697,6 +748,9 @@ def _build_message(
             parts.append(f"<b>{html.escape(title, quote=False)}</b>")
         if fitted_body:
             parts.append(html.escape(fitted_body, quote=False))
+        image_label = _generated_image_label(item)
+        if image_label:
+            parts.append(html.escape(image_label, quote=False))
         if topic:
             parts.append(html.escape(topic, quote=False))
         if footer:
@@ -714,6 +768,9 @@ def _build_message(
             parts.append(title)
         if fitted_body:
             parts.append(fitted_body)
+        image_label = _generated_image_label(item)
+        if image_label:
+            parts.append(image_label)
         if topic:
             parts.append(topic)
         if footer:

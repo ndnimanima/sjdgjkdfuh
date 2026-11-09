@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     channel_draft  TEXT DEFAULT '',
     transcript_len INTEGER DEFAULT 0,
     status         TEXT NOT NULL DEFAULT 'processing',
+    analysis_mode  TEXT DEFAULT 'extractive',
     progress_msg   TEXT DEFAULT '',
     error          TEXT DEFAULT '',
     include_link   INTEGER NOT NULL DEFAULT 0,
@@ -291,6 +292,15 @@ DEFAULT_SETTINGS = {
     "openai_base_url": "https://api.openai.com/v1",
     "openai_model": "gpt-4o-mini",
     "openai_api_key": "",
+    # dedicated media analysis (OpenAI-compatible chat-completions API)
+    "analysis_api_base_url": "https://api.openai.com/v1",
+    "analysis_api_model": "gpt-4o-mini",
+    "analysis_api_key": "",
+    # optional image-generation fallback (disabled until explicitly enabled)
+    "image_generation_enabled": "0",
+    "image_api_base_url": "https://api.openai.com/v1",
+    "image_api_model": "gpt-image-1",
+    "image_api_key": "",
     # publishing
     "global_footer": "",
     "max_message_chars": "3800",
@@ -350,6 +360,7 @@ def _migrate() -> None:
             "tags": "TEXT DEFAULT ''",
             "show_source": "INTEGER DEFAULT 0",
         },
+        "analyses": {"analysis_mode": "TEXT DEFAULT 'extractive'"},
         "logs": {"code": "TEXT DEFAULT ''"},
     }
     for table, columns in wanted.items():

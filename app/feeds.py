@@ -17,8 +17,10 @@ import html as html_lib
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import feedparser
 import httpx
@@ -75,6 +77,149 @@ class FeedError(RuntimeError):
     pass
 
 
+_PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_PERSIAN_MONTHS = {
+    "فروردین": 1, "اردیبهشت": 2, "خرداد": 3, "تیر": 4, "مرداد": 5,
+    "امرداد": 5, "شهریور": 6, "مهر": 7, "آبان": 8, "ابان": 8,
+    "آذر": 9, "اذر": 9, "دی": 10, "بهمن": 11, "اسفند": 12,
+    "farvardin": 1, "farvardin": 1, "ordibehesht": 2, "ordibehesht": 2,
+    "khordad": 3, "tir": 4, "mordad": 5, "amordad": 5, "shahrivar": 6,
+    "mehr": 7, "aban": 8, "azar": 9, "dey": 10, "bahman": 11, "esfand": 12,
+}
+
+
+def _source_timezone():
+    try:
+        return ZoneInfo(config.DEFAULT_TZ or "Asia/Tehran")
+    except Exception:  # noqa: BLE001
+        return timezone.utc
+
+
+def _jalali_to_gregorian(jy: int, jm: int, jd: int) -> tuple[int, int, int] | None:
+    """Convert a Solar Hijri date to Gregorian without a runtime dependency."""
+    if not (1 <= jm <= 12 and 1 <= jd <= (31 if jm <= 6 else 30)):
+        return None
+    jy += 1595
+    days = (
+        -355668 + 365 * jy + (jy // 33) * 8 + ((jy % 33 + 3) // 4) + jd
+        + ((jm - 1) * 31 if jm < 7 else (jm - 7) * 30 + 186)
+    )
+    gy = 400 * (days // 146097)
+    days %= 146097
+    if days > 36524:
+        days -= 1
+        gy += 100 * (days // 36524)
+        days %= 36524
+        if days >= 365:
+            days += 1
+    gy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        gy += (days - 1) // 365
+        days = (days - 1) % 365
+    gd = days + 1
+    leap = (gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0
+    month_days = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    gm = 1
+    for month_length in month_days:
+        if gd <= month_length:
+            break
+        gd -= month_length
+        gm += 1
+    return gy, gm, gd
+
+
+def _jalali_year_for_now(now: datetime | None = None) -> int:
+    local = (now or datetime.now(_source_timezone())).astimezone(_source_timezone())
+    # The Solar Hijri year turns around March 20/21.
+    return local.year - (621 if (local.month, local.day) >= (3, 21) else 622)
+
+
+def parse_publication_datetime(value: Any, now: datetime | None = None) -> datetime | None:
+    """Parse ISO/RFC and Persian Solar Hijri publication dates into aware UTC."""
+    if isinstance(value, datetime):
+        stamp = value
+    else:
+        raw = str(value or "").strip().translate(_PERSIAN_DIGITS)
+        if not raw:
+            return None
+        raw = raw.replace("ي", "ی").replace("ك", "ک")
+        stamp = None
+        # ISO dates with a Solar Hijri year also pass fromisoformat; detect those
+        # explicitly before treating the year as Gregorian.
+        try:
+            candidate = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if 1200 <= candidate.year < 1600:
+                converted = _jalali_to_gregorian(candidate.year, candidate.month, candidate.day)
+                if converted:
+                    stamp = datetime(*converted, candidate.hour, candidate.minute, candidate.second,
+                                     candidate.microsecond, tzinfo=candidate.tzinfo)
+            else:
+                stamp = candidate
+        except ValueError:
+            pass
+
+        if stamp is None:
+            # Solar Hijri dates such as «۷ آبان ۱۴۰۵» or «۱۴۰۵/۰۸/۰۷».
+            month_names = "|".join(sorted((re.escape(k) for k in _PERSIAN_MONTHS), key=len, reverse=True))
+            month_date = re.search(
+                rf"(?P<day>\d{{1,2}})\s+(?P<month>{month_names})\s+(?P<year>\d{{4}})|"
+                rf"(?P<year2>\d{{4}})\s+(?P<month2>{month_names})\s+(?P<day2>\d{{1,2}})",
+                raw,
+                re.I,
+            )
+            year = month = day = 0
+            if month_date:
+                if month_date.group("year"):
+                    day = int(month_date.group("day"))
+                    month = _PERSIAN_MONTHS[month_date.group("month").lower()]
+                    year = int(month_date.group("year"))
+                else:
+                    day = int(month_date.group("day2"))
+                    month = _PERSIAN_MONTHS[month_date.group("month2").lower()]
+                    year = int(month_date.group("year2"))
+            else:
+                numeric_date = re.search(r"(?<!\d)(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?!\d)", raw)
+                if numeric_date and 1200 <= int(numeric_date.group(1)) < 1600:
+                    year, month, day = map(int, numeric_date.groups())
+                else:
+                    day_first = re.search(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)", raw)
+                    if day_first and 1200 <= int(day_first.group(3)) < 1600:
+                        day, month, year = map(int, day_first.groups())
+                    elif re.search(r"(?<!\d)(\d{1,2})\s+(?:آبان|ابان)\b", raw, re.I):
+                        m = re.search(r"(?<!\d)(\d{1,2})\s+(?:آبان|ابان)\b", raw, re.I)
+                        day, month, year = int(m.group(1)), 8, _jalali_year_for_now(now)
+            if year:
+                converted = _jalali_to_gregorian(year, month, day)
+                if converted:
+                    time_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?", raw)
+                    hour, minute, second = (0, 0, 0)
+                    if time_match:
+                        hour = min(23, int(time_match.group(1)))
+                        minute = min(59, int(time_match.group(2)))
+                        second = min(59, int(time_match.group(3) or 0))
+                    stamp = datetime(*converted, hour, minute, second, tzinfo=_source_timezone())
+
+        if stamp is None:
+            try:
+                stamp = parsedate_to_datetime(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_source_timezone())
+    try:
+        return stamp.astimezone(timezone.utc).replace(microsecond=0)
+    except (OverflowError, ValueError):
+        return None
+
+
+def normalize_publication_date(value: Any) -> str:
+    """Return a stable UTC ISO-8601 timestamp, or an empty string if unknown."""
+    stamp = parse_publication_datetime(value)
+    return stamp.isoformat() if stamp else ""
+
+
 def clean_text(raw: str | None, limit: int = 2600, preserve_paragraphs: bool = True) -> str:
     """Clean HTML/feed markup into crisp, readable journalistic text."""
     if not raw:
@@ -115,17 +260,25 @@ def _clean_title(title: str) -> str:
 
 
 def _to_iso(entry: Any) -> str:
-    for attr in ("published_parsed", "updated_parsed", "created_parsed"):
-        value = getattr(entry, attr, None) or (entry.get(attr) if isinstance(entry, dict) else None)
+    """Normalize feed dates, preferring publication over update timestamps."""
+    getter = entry.get if isinstance(entry, dict) else lambda key: getattr(entry, key, None)
+    for parsed_key, raw_key in (
+        ("published_parsed", "published"),
+        ("created_parsed", "created"),
+        ("updated_parsed", "updated"),
+        ("published_parsed", "datePublished"),
+        ("created_parsed", "date"),
+    ):
+        value = getter(parsed_key)
         if value:
             try:
-                return (
-                    datetime.fromtimestamp(calendar.timegm(value), tz=timezone.utc)
-                    .replace(microsecond=0)
-                    .isoformat()
-                )
+                return datetime.fromtimestamp(calendar.timegm(value), tz=timezone.utc).replace(microsecond=0).isoformat()
             except (TypeError, ValueError, OverflowError):
-                continue
+                pass
+        raw = getter(raw_key)
+        normalized = normalize_publication_date(raw)
+        if normalized:
+            return normalized
     return ""
 
 
@@ -443,10 +596,15 @@ def _extract_json_ld(soup: BeautifulSoup, base_url: str, site_logo: str = "") ->
 
 ARTICLE_SELECTORS = (
     "[itemprop='articleBody']",
-    "article .entry-content",
-    "article .post-content",
+    ".article__body",
+    ".article__content",
     ".article-body",
     ".article-content",
+    ".content-article",
+    ".post__content",
+    ".post-body",
+    "article .entry-content",
+    "article .post-content",
     ".news-body",
     ".news-text",
     ".news_body",
@@ -543,7 +701,37 @@ def _extract_dom_article(soup: BeautifulSoup, base_url: str, site_logo: str = ""
         if sum(len(x) for x in paragraphs) >= 2800:
             break
 
-    # Fallback if site uses <div> text blocks instead of <p>
+    # Some layouts (including several Persian news sites) wrap story paragraphs
+    # outside the first semantic <article> container. If that container yielded
+    # only a lead or teaser, collect the real, non-navigation paragraphs from the
+    # sanitized document before giving up.
+    if sum(len(p) for p in paragraphs) < 320:
+        for p in work.find_all(["p", "blockquote"]):
+            noisy_parent = False
+            for ancestor in p.parents:
+                if ancestor is work or getattr(ancestor, "name", None) in ("body", "html"):
+                    continue
+                attrs_txt = " ".join(ancestor.get("class") or []) + " " + str(ancestor.get("id") or "")
+                if JUNK_CONTAINERS_RE.search(attrs_txt):
+                    noisy_parent = True
+                    break
+            if noisy_parent:
+                continue
+            txt = HSPACE_RE.sub(" ", p.get_text(" ", strip=True)).strip()
+            if len(txt) < 28 or BOILERPLATE_LINE_RE.match(txt):
+                continue
+            link_txt_len = sum(len(a.get_text(strip=True)) for a in p.find_all("a"))
+            if link_txt_len > 0.78 * len(txt) and len(txt) < 140:
+                continue
+            sig = txt[:80]
+            if sig in seen_p:
+                continue
+            seen_p.add(sig)
+            paragraphs.append(txt)
+            if sum(len(x) for x in paragraphs) >= 2800:
+                break
+
+    # Fallback if a site uses <div> text blocks instead of <p>.
     if not paragraphs and best_container:
         raw_html = str(best_container)
         cleaned = clean_text(raw_html, limit=2600, preserve_paragraphs=True)
@@ -589,6 +777,56 @@ def _find_aggregator_target(soup: BeautifulSoup, page_url: str) -> str:
     return ""
 
 
+def _visible_publication_hint(soup: BeautifulSoup) -> str:
+    """Find a publisher's visible byline date when machine-readable dates are absent."""
+    # Time elements are the most reliable visible-date source on magazine sites.
+    for time_el in soup.find_all("time"):
+        candidate = str(time_el.get("datetime") or time_el.get_text(" ", strip=True)).strip()
+        if candidate and parse_publication_datetime(candidate):
+            return candidate
+
+    # Publisher timestamps often sit in a byline just outside <article>, so
+    # search the document's visible text (the unlabelled fallback below is
+    # bounded to the first 2,500 characters).
+    text = soup.get_text(" ", strip=True)[:6000].translate(_PERSIAN_DIGITS)
+    months = "|".join(sorted((re.escape(k) for k in _PERSIAN_MONTHS), key=len, reverse=True))
+    date_part = (
+        rf"(?:\d{{1,2}}\s+(?:{months})\s+\d{{4}}|"
+        rf"\d{{4}}\s+(?:{months})\s+\d{{1,2}}|"
+        r"\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})"
+    )
+    match = re.search(
+        rf"(?:منتشر\s*شده\s*(?:در)?|تاریخ\s*انتشار|انتشار|published(?:\s+on)?|posted(?:\s+on)?)"
+        rf"\s*[:،]?\s*(?P<date>{date_part})(?:\s*(?:\||،|,|[-–—])?\s*(?P<time>\d{{1,2}}:\d{{2}}(?::\d{{2}})?))?",
+        text,
+        re.I,
+    )
+    if match:
+        return " ".join(part for part in (match.group("date"), match.group("time")) if part)
+
+    # A few publisher templates display only “7 Aban 1405 · 15:25”, without a
+    # word such as “Published”. Restrict this fallback to the start of the page
+    # text so dates mentioned deeper in a story are not mistaken for its byline.
+    bare_date = re.search(
+        rf"(?P<date>\d{{1,2}}\s+(?:{months})\s+\d{{4}}|\d{{4}}\s+(?:{months})\s+\d{{1,2}}|"
+        r"\d{4}[./-]\d{1,2}[./-]\d{1,2})"
+        r"(?:\s*(?:·|\||،|,|[-–—])?\s*(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?",
+        text[:2500],
+        re.I,
+    )
+    if bare_date:
+        return " ".join(part for part in (bare_date.group("date"), bare_date.group("time")) if part)
+
+    # English machine-readable style often appears in a human byline without a label.
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
+        for candidate in re.findall(r"[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4}", text[:2500]):
+            try:
+                return datetime.strptime(candidate, fmt).isoformat()
+            except ValueError:
+                continue
+    return ""
+
+
 def parse_article_html(html_text: str, page_url: str, site_logo: str = "") -> dict[str, Any]:
     """Parse a single web/article HTML document into title, body, real image, meta."""
     soup = BeautifulSoup(html_text, "html.parser")
@@ -599,6 +837,11 @@ def parse_article_html(html_text: str, page_url: str, site_logo: str = "") -> di
     meta_img = ""
     meta_title = ""
     meta_site = ""
+    meta_published = ""
+    published_meta_keys = {
+        "article:published_time", "article:published", "datepublished", "datepublished",
+        "publishdate", "publication_date", "pubdate", "date", "dc.date", "parsely-pub-date",
+    }
     for meta in soup.find_all("meta"):
         key = str(meta.get("property") or meta.get("name") or "").lower().strip()
         val = str(meta.get("content") or "").strip()
@@ -614,6 +857,8 @@ def parse_article_html(html_text: str, page_url: str, site_logo: str = "") -> di
             meta_title = _clean_title(val)
         elif key == "og:site_name":
             meta_site = val.strip()
+        elif key in published_meta_keys and not meta_published:
+            meta_published = val
 
     dom_body, dom_img = _extract_dom_article(soup, page_url, site_logo=site_logo)
 
@@ -651,12 +896,17 @@ def parse_article_html(html_text: str, page_url: str, site_logo: str = "") -> di
     if kw_tag and kw_tag.get("content"):
         tags.extend([x.strip() for x in str(kw_tag["content"]).replace("،", ",").split(",") if x.strip()])
 
+    published = ""
+    for published_value in (ld.get("published"), meta_published, _visible_publication_hint(soup)):
+        published = normalize_publication_date(published_value)
+        if published:
+            break
     return {
         "title": title[:400],
         "body": body,
         "image": image,
         "author": ld.get("author") or meta_site or "",
-        "published": ld.get("published") or "",
+        "published": published,
         "tags": ", ".join(dict.fromkeys(tags))[:300],
         "_target_url": _find_aggregator_target(soup, page_url),
     }
@@ -669,7 +919,7 @@ async def enrich_article(link: str, site_logo: str = "") -> dict[str, Any]:
         return empty
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0), follow_redirects=True, headers=BROWSER_HEADERS
+            timeout=httpx.Timeout(config.HTTP_TIMEOUT), follow_redirects=True, headers=BROWSER_HEADERS
         ) as client:
             resp = await client.get(link)
             if resp.status_code >= 400:
@@ -746,25 +996,31 @@ def item_hash(feed_url: str, item: dict) -> str:
     return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:32]
 
 
-def within_window(item: dict, hours: int, now: datetime | None = None) -> bool:
+def within_window(
+    item: dict,
+    hours: int,
+    now: datetime | None = None,
+    *,
+    allow_missing: bool = False,
+) -> bool:
+    """Check recency using a normalized source date; unknown dates are not fresh by default.
+
+    The pipeline sets ``allow_missing=True`` only for its initial candidate pass,
+    so an undated RSS entry can be fetched once for the article's published date.
+    """
     if hours <= 0:
         return True
-    now = now or datetime.now(timezone.utc)
-    published = item.get("published") or ""
-    if not published:
-        return True
-    try:
-        stamp = datetime.fromisoformat(published)
-    except ValueError:
-        return True
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp >= now - timedelta(hours=hours)
+    stamp = parse_publication_datetime(item.get("published"))
+    if stamp is None:
+        return allow_missing
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return stamp >= current - timedelta(hours=hours)
 
 
 def published_sort_key(item: dict) -> datetime:
-    try:
-        stamp = datetime.fromisoformat(item.get("published") or "")
-        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return datetime.now(timezone.utc)
+    stamp = parse_publication_datetime(item.get("published"))
+    return stamp or datetime.min.replace(tzinfo=timezone.utc)

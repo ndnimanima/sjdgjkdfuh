@@ -97,7 +97,7 @@ systemctl daemon-reload
 systemctl enable --now "$SERVICE"
 systemctl --no-pager --lines=6 status "$SERVICE" || true
 
-ok "Rozaneh v1.04 is installed."
+ok "Rozaneh v1.06 is installed."
 echo
 echo "  Panel: http://$(hostname -I | awk '{print $1}'):$PORT"
 echo "  First-run password: $APP_DIR/.env (ADMIN_PASSWORD)"

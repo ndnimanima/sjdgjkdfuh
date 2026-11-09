@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Rozaneh · روزنه — panel application (v1.04)
+   Rozaneh · روزنه — panel application (v1.06)
    Vanilla ES2019+, no build step, no external assets.
    ========================================================================== */
 (function () {
@@ -60,11 +60,14 @@
     const n = Number(v || 0);
     try { return n.toLocaleString(isFa() ? "fa-IR" : "en-US"); } catch (e) { return String(n); }
   }
+  function panelTimezone() {
+    return (S.settings && S.settings.timezone) || (S.meta && S.meta.defaults && S.meta.defaults.timezone) || "UTC";
+  }
   function fmtDate(iso, withTime) {
     if (!iso) return "—";
     const d = new Date(iso);
     if (isNaN(d.getTime())) return String(iso);
-    const opt = { year: "numeric", month: "short", day: "2-digit" };
+    const opt = { year: "numeric", month: "short", day: "2-digit", timeZone: panelTimezone() };
     if (withTime !== false) { opt.hour = "2-digit"; opt.minute = "2-digit"; }
     try {
       const out = d.toLocaleString(isFa() ? "fa-IR" : "en-US", opt);
@@ -75,7 +78,7 @@
     if (!iso) return "—";
     const d = new Date(iso);
     if (isNaN(d.getTime())) return String(iso);
-    try { return d.toLocaleTimeString(isFa() ? "fa-IR" : "en-US", { hour: "2-digit", minute: "2-digit" }); }
+    try { return d.toLocaleTimeString(isFa() ? "fa-IR" : "en-US", { hour: "2-digit", minute: "2-digit", timeZone: panelTimezone() }); }
     catch (e) { return d.toISOString().slice(11, 16); }
   }
   function fmtLogTime(iso) {
@@ -166,6 +169,7 @@
     upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/>',
     sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>',
+    palette: '<path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 1.5-3.3 1.9 1.9 0 0 1 1.5-3.1h.8A4 4 0 0 0 21 10.7 7.7 7.7 0 0 0 12 3z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7.5" r="1"/><circle cx="15" cy="8" r="1"/>',
     moon: '<path d="M21 12.8A8.6 8.6 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8z"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
@@ -314,7 +318,7 @@
     const themes = ["slate", "cyber", "emerald", "amber"];
     if (!themes.includes(S.theme)) S.theme = "slate";
     document.documentElement.dataset.theme = S.theme;
-    $$(".theme-dot").forEach((button) => {
+    $$(".theme-choice").forEach((button) => {
       const active = button.dataset.t === S.theme;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
@@ -435,8 +439,29 @@
 
     const themeSwitch = $("#themeSwitch");
     if (themeSwitch) themeSwitch.addEventListener("click", (ev) => {
-      const button = ev.target.closest("[data-t]");
-      if (button) setTheme(button.dataset.t);
+      const choice = ev.target.closest("[data-t]");
+      if (choice) {
+        setTheme(choice.dataset.t);
+        const popover = $("#themePopover");
+        const trigger = $("#themeToggle");
+        if (popover) popover.hidden = true;
+        if (trigger) trigger.setAttribute("aria-expanded", "false");
+        return;
+      }
+      if (ev.target.closest("#themeToggle")) {
+        const popover = $("#themePopover");
+        const trigger = $("#themeToggle");
+        if (popover) popover.hidden = !popover.hidden;
+        if (trigger) trigger.setAttribute("aria-expanded", popover && !popover.hidden ? "true" : "false");
+      }
+    });
+    document.addEventListener("click", (ev) => {
+      if (themeSwitch && !themeSwitch.contains(ev.target)) {
+        const popover = $("#themePopover");
+        const trigger = $("#themeToggle");
+        if (popover) popover.hidden = true;
+        if (trigger) trigger.setAttribute("aria-expanded", "false");
+      }
     });
 
     const logout = $("#logoutBtn");
@@ -461,6 +486,10 @@
         if ($("#modalRoot") && $("#modalRoot").innerHTML) closeModal();
         const sidebar = $("#sidebar");
         if (sidebar) sidebar.classList.remove("open");
+        const themePopover = $("#themePopover");
+        const themeToggle = $("#themeToggle");
+        if (themePopover) themePopover.hidden = true;
+        if (themeToggle) themeToggle.setAttribute("aria-expanded", "false");
       }
     });
     window.addEventListener("hashchange", () => {
@@ -708,7 +737,8 @@
 
   async function renderAnalyzer(view) {
     view.innerHTML = '<div class="card"><div class="card-body"><div class="skeleton" style="width:55%"></div></div></div>';
-    const [list, _dests] = await Promise.all([api("/api/analyzer?limit=40"), loadDests()]);
+    const [list, _dests, settings] = await Promise.all([api("/api/analyzer?limit=40"), loadDests(), loadSettings()]);
+    S.settings = settings || {};
     S.analyses = list.analyses || [];
     if (S.currentAnalysis) {
       const fresh = S.analyses.find((a) => Number(a.id) === Number(S.currentAnalysis.id));
@@ -717,15 +747,38 @@
       S.currentAnalysis = S.analyses[0];
     }
 
-    const form = '<section class="card"><div class="card-head"><div><h2 class="card-title">' + ico("link") +
+    const aiSettings = S.settings || {};
+    const aiReady = Boolean(aiSettings.analysis_api_key_set || aiSettings.deepseek_key_set || aiSettings.openai_key_set);
+    const imageApiReady = String(aiSettings.image_generation_enabled || "0") === "1" && Boolean(aiSettings.image_api_key_set);
+    const aiStatusText = aiReady ? t("an.aiConfigured") : t("an.aiMissing");
+    const form = '<section class="card analyzer-input-card"><div class="card-head"><div><h2 class="card-title">' + ico("link") +
       h(t("an.inputLabel")) + '</h2><p class="card-sub">' + h(t("an.sub")) + '</p></div></div><div class="card-body">' +
       '<form class="form" data-form="analyzer" id="analyzerForm">' +
       '<div class="field"><label for="analysisUrl">' + h(t("an.inputLabel")) + '</label><input class="input ltr" type="url" id="analysisUrl" name="url" required placeholder="' + h(t("an.inputPh")) + '"></div>' +
-      '<div class="field"><label for="analysisCustomText">' + h(t("an.customLabel")) + '</label><textarea class="input" id="analysisCustomText" name="custom_text" rows="4" placeholder="' + h(t("an.customPh")) + '"></textarea></div>' +
-      '<div class="form-row"><label class="switch"><input type="checkbox" name="include_link" value="1"><span>' + h(t("an.includeLink")) + '</span></label>' +
-      '<label class="switch"><input type="checkbox" name="send_image" value="1" checked><span>' + h(t("an.sendImage")) + '</span></label></div>' +
-      '<button class="btn btn-primary" type="button" data-act="submit" data-form-id="analyzerForm">' + ico("sparkles") + '<span>' +
-      h(t("an.submit")) + '</span></button></form></div></section>';
+      '<div class="field"><label for="analysisCustomText">' + h(t("an.customLabel")) + '</label><textarea class="input" id="analysisCustomText" name="custom_text" rows="3" placeholder="' + h(t("an.customPh")) + '"></textarea></div>' +
+      '<div class="analyzer-options"><label class="analyzer-option"><input type="checkbox" name="include_link" value="1"><span>' + h(t("an.includeLinkShort")) + '</span></label>' +
+      '<label class="analyzer-option"><input type="checkbox" name="send_image" value="1" checked><span>' + h(t("an.sendImageShort")) + '</span></label></div>' +
+      '<button class="btn btn-primary analyzer-submit" type="button" data-act="submit" data-form-id="analyzerForm">' + ico("sparkles") + '<span>' +
+      h(t("an.submit")) + '</span></button></form>' +
+      '<details class="analyzer-ai-settings" id="analyzerAiSettings"><summary><span class="ai-settings-title">' + ico("sparkles") + h(t("an.aiSettings")) +
+      '</span><span class="chip ' + (aiReady ? 'ok' : 'warn') + '" id="analysisApiStatus">' + h(aiStatusText) + '</span></summary>' +
+      '<div class="analyzer-ai-body"><p class="tiny mute">' + h(t("an.aiSettingsNote")) + '</p>' +
+      '<form data-form="analyzer-ai" id="analyzerAiForm"><div class="ai-subhead">' + ico("book") + h(t("an.aiAnalysisProvider")) + '</div>' +
+      '<div class="form-grid">' +
+      '<div class="field"><label for="analysisApiBase">' + h(t("an.aiBaseUrl")) + '</label><input class="input ltr" id="analysisApiBase" type="url" name="analysis_api_base_url" value="' + h(aiSettings.analysis_api_base_url || 'https://api.openai.com/v1') + '"></div>' +
+      '<div class="field"><label for="analysisApiModel">' + h(t("an.aiModel")) + '</label><input class="input ltr" id="analysisApiModel" type="text" name="analysis_api_model" value="' + h(aiSettings.analysis_api_model || 'gpt-4o-mini') + '"></div>' +
+      '<div class="field span2"><label for="analysisApiKey">' + h(t("an.aiApiKey")) + '</label><input class="input ltr" id="analysisApiKey" type="password" name="analysis_api_key" value="' + h(aiSettings.analysis_api_key || '') + '" placeholder="' + h(aiSettings.analysis_api_key_set ? t("settings.key_set") : 'sk-…') + '" autocomplete="off"></div>' +
+      '</div><div class="ai-subhead ai-image-subhead">' + ico("image") + h(t("an.aiImageProvider")) + '</div>' +
+      '<p class="tiny mute">' + h(t("an.aiImageNote")) + '</p>' +
+      '<div class="analyzer-ai-toggle">' + toggleEl("image_generation_enabled", String(aiSettings.image_generation_enabled || "0") === "1") + '<span>' + h(t("an.aiImageEnabled")) + '</span>' +
+      '<span class="chip ' + (imageApiReady ? 'ok' : 'warn') + '" id="imageApiStatus">' + h(imageApiReady ? t("an.aiImageReady") : t("an.aiImageOptional")) + '</span></div>' +
+      '<div class="form-grid">' +
+      '<div class="field"><label for="imageApiBase">' + h(t("an.aiImageBaseUrl")) + '</label><input class="input ltr" id="imageApiBase" type="url" name="image_api_base_url" value="' + h(aiSettings.image_api_base_url || 'https://api.openai.com/v1') + '"></div>' +
+      '<div class="field"><label for="imageApiModel">' + h(t("an.aiImageModel")) + '</label><input class="input ltr" id="imageApiModel" type="text" name="image_api_model" value="' + h(aiSettings.image_api_model || 'gpt-image-1') + '"></div>' +
+      '<div class="field span2"><label for="imageApiKey">' + h(t("an.aiImageKey")) + '</label><input class="input ltr" id="imageApiKey" type="password" name="image_api_key" value="' + h(aiSettings.image_api_key || '') + '" placeholder="' + h(aiSettings.image_api_key_set ? t("settings.key_set") : 'sk-…') + '" autocomplete="off"></div>' +
+      '</div><div class="analyzer-ai-actions"><button type="button" class="btn btn-sm" data-act="analyzer.ai.save">' + ico("check") + '<span>' + h(t("an.aiSave")) + '</span></button>' +
+      '<button type="button" class="btn btn-sm btn-ghost" data-act="analyzer.ai.test">' + ico("zap") + '<span>' + h(t("an.aiTest")) + '</span></button></div>' +
+      '</form></div></details></div></section>';
 
     view.innerHTML = pageHead(t("an.title"), t("an.sub"),
       btn(t("top.refresh"), "reload", { cls: "ghost", icon: "refresh" })) +
@@ -741,6 +794,60 @@
       '</div></div></section></div></div>';
 
     if (S.currentAnalysis && S.currentAnalysis.status === "processing") startAnalyzerPolling(S.currentAnalysis.id);
+  }
+
+  function updateAnalyzerPanels() {
+    const result = $("#analysisResult");
+    if (result) result.innerHTML = renderAnalysisDetail(S.currentAnalysis);
+    const history = $("#analysisHistory");
+    if (history) history.innerHTML = renderAnalysisHistory(S.analyses || []);
+  }
+
+  async function reloadAnalyzerHistory() {
+    const rows = await api("/api/analyzer?limit=40");
+    S.analyses = rows.analyses || [];
+    if (S.currentAnalysis) {
+      const fresh = S.analyses.find((item) => Number(item.id) === Number(S.currentAnalysis.id));
+      if (fresh) S.currentAnalysis = fresh;
+    }
+    updateAnalyzerPanels();
+  }
+
+  function updateAnalyzerApiBadges() {
+    const settings = S.settings || {};
+    const aiReady = Boolean(settings.analysis_api_key_set || settings.deepseek_key_set || settings.openai_key_set);
+    const aiStatus = $("#analysisApiStatus");
+    if (aiStatus) {
+      aiStatus.className = "chip " + (aiReady ? "ok" : "warn");
+      aiStatus.textContent = aiReady ? t("an.aiConfigured") : t("an.aiMissing");
+    }
+    const imageReady = String(settings.image_generation_enabled || "0") === "1" && Boolean(settings.image_api_key_set);
+    const imageStatus = $("#imageApiStatus");
+    if (imageStatus) {
+      imageStatus.className = "chip " + (imageReady ? "ok" : "warn");
+      imageStatus.textContent = imageReady ? t("an.aiImageReady") : t("an.aiImageOptional");
+    }
+  }
+
+  async function saveAnalyzerAiSettings() {
+    const form = $("#analyzerAiForm");
+    if (!form) throw new Error("analyzer_settings_missing");
+    const values = fd(form);
+    const patch = {
+      analysis_api_base_url: values.analysis_api_base_url,
+      analysis_api_model: values.analysis_api_model,
+      image_generation_enabled: tgVal(form, "image_generation_enabled"),
+      image_api_base_url: values.image_api_base_url,
+      image_api_model: values.image_api_model,
+    };
+    // Empty secret fields mean “keep the stored key”; credentials are never
+    // returned to the browser, even in partially masked form.
+    if (String(values.analysis_api_key || "").trim()) patch.analysis_api_key = values.analysis_api_key.trim();
+    if (String(values.image_api_key || "").trim()) patch.image_api_key = values.image_api_key.trim();
+    const response = await api("/api/settings", { method: "PATCH", body: patch });
+    S.settings = response.settings || S.settings;
+    updateAnalyzerApiBadges();
+    return S.settings;
   }
 
   function renderAnalysisHistory(analyses) {
@@ -773,6 +880,7 @@
         (analysis.image ? '<div class="media-card-cover"><img src="' + h(analysis.image) + '" alt="" loading="lazy"><span class="media-duration-badge">' +
           h(analysis.duration_fmt || analysis.platform || '') + '</span></div>' : '') +
         '<div class="analysis-metrics"><span class="pill brand">' + h(analysis.platform || 'web') + '</span>' +
+          '<span class="pill ' + (analysis.analysis_mode === 'ai' ? 'ok' : '') + '">' + h(analysis.analysis_mode === 'ai' ? t("an.modeAI") : t("an.modeBasic")) + '</span>' +
           (analysis.author ? '<span class="pill">' + h(analysis.author) + '</span>' : '') +
           (analysis.duration_fmt ? '<span class="pill">' + h(t("an.duration", { d: analysis.duration_fmt })) + '</span>' : '') +
           '<span class="pill">' + h(t("an.chars", { n: num(analysis.transcript_len || 0) })) + '</span>' +
@@ -780,7 +888,7 @@
         '</div>' +
         (analysis.summary ? '<div class="an-section"><h4>' + ico("sparkles") + h(t("an.execSummary")) + '</h4><div dir="auto">' + h(analysis.summary) + '</div></div>' : '') +
         (pointText.length ? '<div class="an-section"><h4>' + ico("list") + h(t("an.keyPoints")) + '</h4><ul class="an-bullets">' + pointText.map((point) => '<li dir="auto">' + h(point) + '</li>').join('') + '</ul></div>' : '') +
-        (analysis.deep_analysis ? '<div class="an-section"><h4>' + ico("book") + h(t("an.deepAnalysis")) + '</h4><div class="analysis-longtext" dir="auto">' + h(analysis.deep_analysis) + '</div></div>' : '') +
+        (analysis.deep_analysis ? '<details class="an-section"><summary class="an-details-summary">' + ico("book") + h(t("an.deepAnalysis")) + '</summary><div class="analysis-longtext" dir="auto">' + h(analysis.deep_analysis) + '</div></details>' : '') +
         (timeline.length ? '<details class="an-section"><summary>' + h(t("an.rawTranscript")) + '</summary><div class="stack" style="margin-top:10px">' + timeline.map((entry) => {
           const line = typeof entry === 'string' ? entry : [entry.time || entry.timestamp || '', entry.text || entry.title || ''].filter(Boolean).join(' — ');
           return '<div class="timeline-row" dir="auto">' + h(line) + '</div>';
@@ -794,7 +902,7 @@
       '<div class="card-body">' + detail +
       (analysis.status === "ready" || analysis.status === "published" ?
         '<div class="an-section"><h4>' + ico("edit") + h(t("an.channelDraft")) + '</h4>' +
-        '<textarea class="input analysis-draft" id="analysisDraft" rows="9" dir="auto">' + h(draft) + '</textarea>' +
+        '<textarea class="input analysis-draft" id="analysisDraft" rows="6" dir="auto">' + h(draft) + '</textarea>' +
         '<div class="analysis-preview-label">' + h(t("an.livePreview")) + '</div><div class="previewbox" id="analysisPreview" dir="auto">' +
         h(draft).replace(/\n/g, '<br>') + '</div>' +
         '<div class="form-row" style="margin-top:12px"><label class="switch"><input type="checkbox" id="analysisIncludeLink"' + (Number(analysis.include_link) ? ' checked' : '') + '><span>' +
@@ -849,7 +957,7 @@
       '<div class="imeta"><span class="pill ' + st[0] + '">' + h(t(st[1])) + '</span>' +
       (it.topic ? '<span class="pill brand">' + h(String(it.topic).split("#")[0].trim()) + '</span>' : '') +
       (it.feed_title ? '<span>' + h(it.feed_title) + '</span>' : '') +
-      '<span>' + h(relTime(it.posted_at || it.created_at)) + '</span>' + source +
+      '<span title="' + h(it.published ? t("items.sourceDate") : t("items.processedDate")) + '">' + h(it.published ? fmtDate(it.published, true) : relTime(it.posted_at || it.created_at)) + '</span>' + source +
       (it.error ? '<span class="pill err">' + h(String(it.error).slice(0, 90)) + '</span>' : '') +
       '</div>' + reason + '</div>' + acts + '</article>';
   }
@@ -885,7 +993,7 @@
         ? '<span class="chip ok">' + h(t("feeds.healthy")) + "</span>"
         : '<span class="chip">' + h(t("feeds.not_checked")) + "</span>";
     return (
-      '<div class="frow">' +
+      '<div class="frow" data-feed-id="' + f.id + '">' +
         '<div class="favatar" style="background:' + tint(col, 0.14) + ";border-color:" + tint(col, 0.4) + ";color:" + col + '">' + h(f.icon || "📰") + "</div>" +
         '<div class="fname"><b dir="auto">' + h(f.title) + "</b>" +
           '<span class="' + (f.show_url ? "" : "hidden_url") + '" title="' + h(f.url) + '">' + h(url) + "</span></div>" +
@@ -898,6 +1006,16 @@
           iconBtn("trash", "feed.del", f.id, "ghost", t("common.delete")) + "</div>" +
       "</div>"
     );
+  }
+
+  function replaceFeedRow(feed) {
+    if (!feed) return;
+    const current = $('[data-feed-id="' + Number(feed.id) + '"]');
+    if (!current) return;
+    const holder = document.createElement("div");
+    holder.innerHTML = feedRow(feed);
+    const replacement = holder.firstElementChild;
+    if (replacement) current.replaceWith(replacement);
   }
 
   function feedModal(feed) {
@@ -1043,11 +1161,11 @@
     const cards = S.dests.map((d) => {
       const p = platform(d.platform);
       const testChip =
-        d.last_test_ok === 1 ? '<span class="chip ok">' + ico("check") + h(t("channels.last_test_ok")) + "</span>"
-          : d.last_test_ok === 0 ? '<span class="chip bad">' + ico("alert") + h(t("channels.last_test_fail")) + "</span>"
+        d.last_test_ok === 1 ? '<span class="chip ok destination-test-status">' + ico("check") + h(t("channels.last_test_ok")) + "</span>"
+          : d.last_test_ok === 0 ? '<span class="chip bad destination-test-status">' + ico("alert") + h(t("channels.last_test_fail")) + "</span>"
             : "";
       return (
-        '<div class="chcard">' +
+        '<div class="chcard" data-dest-id="' + d.id + '">' +
           '<div class="spread"><div class="inline"><span class="plat">' + platIcon(d.platform) + "</span>" +
             "<div><b style=\"font-size:13px\" dir=\"auto\">" + h(d.name) + '</b><div class="tiny mute">' + h(platName(p)) + "</div></div></div>" +
             toggleEl("dest-" + d.id, Number(d.enabled), "dest.toggle", d.id) + "</div>" +
@@ -1082,6 +1200,24 @@
           '<div class="tiny mute">' + h(isFa() ? p.hint_fa : p.hint_en) + "</div>" +
           '<div class="tiny mute">' + h(isFa() ? p.token_hint_fa : p.token_hint_en) + "</div></div>"
         ).join("") + "</div></div></section>";
+  }
+
+  function updateDestinationCard(destination) {
+    if (!destination) return;
+    const idx = S.dests.findIndex((item) => Number(item.id) === Number(destination.id));
+    if (idx >= 0) S.dests[idx] = destination;
+    const card = $('[data-dest-id="' + Number(destination.id) + '"]');
+    if (!card) return;
+    const meta = card.querySelector(".jobmeta");
+    if (meta && destination.last_test_ok !== null && destination.last_test_ok !== undefined) {
+      let chip = meta.querySelector(".destination-test-status");
+      if (!chip) { chip = document.createElement("span"); meta.appendChild(chip); }
+      const ok = Number(destination.last_test_ok) === 1;
+      chip.className = "chip " + (ok ? "ok" : "bad") + " destination-test-status";
+      chip.innerHTML = ico(ok ? "check" : "alert") + h(t(ok ? "channels.last_test_ok" : "channels.last_test_fail"));
+    }
+    const time = card.querySelector(".jobfoot .tiny.mute");
+    if (time) time.textContent = destination.last_test_at ? relTime(destination.last_test_at) : "";
   }
 
   function num(v) {
@@ -1430,6 +1566,38 @@
     }
   }
 
+  async function refreshArchiveItem(itemId) {
+    if (S.route !== "archive" && S.route !== "items") return;
+    const q = S.archive.q || "";
+    const data = await api("/api/items?status=all&q=" + encodeURIComponent(q) + "&limit=200");
+    const item = (data.items || []).find((row) => Number(row.id) === Number(itemId));
+    const status = S.archive.status || "all";
+    const visible = item && (status === "all" || item.status === status);
+    const rows = $("#view .rows");
+    const current = $('[data-item-id="' + Number(itemId) + '"]');
+    if (rows) {
+      if (!visible) {
+        if (current) current.remove();
+      } else {
+        const holder = document.createElement("div");
+        holder.innerHTML = itemRow(item);
+        const replacement = holder.firstElementChild;
+        if (replacement) {
+          if (current) current.replaceWith(replacement);
+          else {
+            const next = Array.from(rows.querySelectorAll(".irow")).find((row) => Number(row.dataset.itemId) < Number(item.id));
+            if (next) next.before(replacement);
+            else rows.appendChild(replacement);
+          }
+        }
+      }
+      if (!rows.querySelector(".irow")) rows.innerHTML = emptyBox("inbox", t("items.empty"), t("items.empty"));
+    }
+    const counts = data.counts || {};
+    const sub = $("#view .page-intro-copy p");
+    if (sub) sub.textContent = t("items.sub") + " · " + num(data.total || 0) + " / " + num(counts.sent || 0);
+  }
+
   /* ── logs ─────────────────────────────────────────────────────────────── */
 
   async function renderLogs(view) {
@@ -1696,8 +1864,7 @@
         creator.website ? '<a class="btn btn-sm" href="' + h(creator.website) + '" target="_blank" rel="noopener">' + ico("globe") + '<span>Web</span></a>' : "",
       ].join("");
       return '<article class="creator-card"><div class="creator-header">' + avatar + '<div><h3 class="creator-name" dir="auto">' + h(name) + '</h3>' +
-        '<div class="creator-role">' + h(role) + '</div></div><button class="btn btn-xs btn-ghost creator-edit" data-act="creator.edit" data-id="' + creator.slot + '" title="' +
-        h(t("common.edit")) + '">' + ico("edit") + '</button></div>' +
+        '<div class="creator-role">' + h(role) + '</div></div></div>' +
         (quote ? '<blockquote class="creator-quote" dir="auto">' + h(quote) + '</blockquote>' : '') +
         (bio ? '<p class="creator-bio" dir="auto">' + h(bio) + '</p>' : '') +
         (skills.length ? '<div class="creator-skills">' + skills.map((skill) => '<span class="skill-chip">' + h(skill) + '</span>').join('') + '</div>' : '') +
@@ -1710,7 +1877,7 @@
     const telegramId = edu.telegram_id || "@nextgen_ain8n";
     const telegramUrl = edu.telegram_url || "https://t.me/nextgen_ain8n";
     const eduTopics = isFa() ? (edu.topics_fa || "") : (edu.topics_en || "");
-    const version = (S.meta && S.meta.version) || "1.04";
+    const version = (S.meta && S.meta.version) || "1.06";
 
     view.innerHTML = pageHead(t("creators.title"), t("creators.sub"),
       btn(t("creators.feedbackTitle"), "creators.bug", { cls: "ghost", icon: "message" })) +
@@ -1818,7 +1985,7 @@
         }});
         S.currentAnalysis = response.analysis;
         if (S.route !== "analyzer") await go("analyzer");
-        else await render();
+        else await reloadAnalyzerHistory();
         startAnalyzerPolling(response.id);
       } finally {
         if (button) { button.disabled = false; if (button.dataset.oldLabel) button.innerHTML = button.dataset.oldLabel; }
@@ -1942,19 +2109,17 @@
       return;
     }
     if (kind === "settings-translation") {
-      await api("/api/settings", {
-        method: "PATCH",
-        body: {
-          translate_provider: v.translate_provider,
-          translate_fallback: v.translate_fallback,
-          deepseek_base_url: v.deepseek_base_url,
-          deepseek_model: v.deepseek_model,
-          deepseek_api_key: v.deepseek_api_key,
-          translate_glossary: v.translate_glossary,
-          translate_post_edit: tgVal(form, "translate_post_edit"),
-          translate_preserve: tgVal(form, "translate_preserve"),
-        },
-      });
+      const translationPatch = {
+        translate_provider: v.translate_provider,
+        translate_fallback: v.translate_fallback,
+        deepseek_base_url: v.deepseek_base_url,
+        deepseek_model: v.deepseek_model,
+        translate_glossary: v.translate_glossary,
+        translate_post_edit: tgVal(form, "translate_post_edit"),
+        translate_preserve: tgVal(form, "translate_preserve"),
+      };
+      if (String(v.deepseek_api_key || "").trim()) translationPatch.deepseek_api_key = v.deepseek_api_key.trim();
+      await api("/api/settings", { method: "PATCH", body: translationPatch });
       toast(t("settings.saved"), "ok");
       return;
     }
@@ -2035,6 +2200,24 @@
       await render();
       if (last) showReport(last);
     },
+    "analyzer.ai.save": async () => {
+      try {
+        await saveAnalyzerAiSettings();
+        toast(t("an.aiSettingsSaved"), "ok");
+      } catch (error) { toast(errMsg(error), "err"); }
+    },
+    "analyzer.ai.test": async (el) => {
+      const old = el.innerHTML;
+      el.disabled = true;
+      el.innerHTML = '<span class="spinner" style="width:14px;height:14px"></span><span>' + h(t("common.loading")) + '</span>';
+      try {
+        await saveAnalyzerAiSettings();
+        const result = await api("/api/analyzer/llm/test", { method: "POST" });
+        if (result.ok) toast(t("an.aiTestOk", { model: result.model || "" }), "ok");
+        else toast(t("an.aiTestFail", { detail: result.error || "unknown" }), "err");
+      } catch (error) { toast(errMsg(error), "err"); }
+      finally { if (el.isConnected) { el.disabled = false; el.innerHTML = old; } }
+    },
     "analyzer.quick": async () => {
       const input = $("#dashAnalyzeInput");
       const value = input ? input.value.trim() : "";
@@ -2049,7 +2232,12 @@
     "analyzer.open": async (el) => {
       const response = await api("/api/analyzer/" + el.dataset.id);
       S.currentAnalysis = response.analysis;
-      await go("analyzer");
+      if (S.route !== "analyzer") await go("analyzer");
+      else {
+        stopAnalyzerPolling();
+        updateAnalyzerPanels();
+        if (S.currentAnalysis.status === "processing") startAnalyzerPolling(S.currentAnalysis.id);
+      }
     },
     "analyzer.save": async (el) => {
       const draft = $("#analysisDraft");
@@ -2079,13 +2267,17 @@
       S.currentAnalysis = response.analysis;
       const sent = (response.results || []).filter((row) => row.ok).length;
       toast(t("an.publishedOk", { sent: num(sent) }), "ok");
-      await render();
+      await reloadAnalyzerHistory();
     },
     "analyzer.delete": (el) => confirmModal(t("common.confirmDelete"), async () => {
+      const wasCurrent = S.currentAnalysis && Number(S.currentAnalysis.id) === Number(el.dataset.id);
       await api("/api/analyzer/" + el.dataset.id, { method: "DELETE" });
-      if (S.currentAnalysis && Number(S.currentAnalysis.id) === Number(el.dataset.id)) S.currentAnalysis = null;
       stopAnalyzerPolling();
-      await render();
+      const rows = await api("/api/analyzer?limit=40");
+      S.analyses = rows.analyses || [];
+      if (wasCurrent) S.currentAnalysis = S.analyses[0] || null;
+      updateAnalyzerPanels();
+      if (S.currentAnalysis && S.currentAnalysis.status === "processing") startAnalyzerPolling(S.currentAnalysis.id);
     }),
 
     /* feeds */
@@ -2111,12 +2303,23 @@
     },
     "feed.check": async (el) => {
       const id = el.dataset.id;
+      const original = el.innerHTML;
+      el.disabled = true;
+      el.innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
       try {
         const r = await api("/api/feeds/" + id + "/check", { method: "POST" });
+        if (r.feed) {
+          const idx = S.feeds.findIndex((feed) => Number(feed.id) === Number(id));
+          if (idx >= 0) S.feeds[idx] = r.feed;
+          replaceFeedRow(r.feed);
+        }
         if (r.ok) toast(t("feeds.test_ok", { n: num(r.total), w: num(r.in_window) }), "ok");
         else toast(r.error || t("feeds.broken"), "err");
-        await render();
-      } catch (e) { toast(errMsg(e), "err"); }
+      } catch (e) {
+        el.disabled = false;
+        el.innerHTML = original;
+        toast(errMsg(e), "err");
+      }
     },
     "feed.del": (el) => {
       const feed = S.feeds.find((f) => Number(f.id) === Number(el.dataset.id));
@@ -2168,6 +2371,7 @@
       toast(t("common.loading"), "info");
       try {
         const r = await api("/api/destinations/" + el.dataset.id + "/verify", { method: "POST" });
+        updateDestinationCard(r.destination);
         if (r.ok) {
           const info = r.info || {};
           const who = [info.bot ? "@" + info.bot : "", info.chat || ""].filter(Boolean).join(" → ");
@@ -2175,16 +2379,15 @@
         } else {
           toast(t("channels.verify_fail", { detail: r.detail || "" }), "err");
         }
-        await render();
       } catch (e) { toast(errMsg(e), "err"); }
     },
     "dest.test": async (el) => {
       toast(t("common.loading"), "info");
       try {
         const r = await api("/api/destinations/" + el.dataset.id + "/test", { method: "POST" });
+        updateDestinationCard(r.destination);
         if (r.ok) toast(t("channels.test_ok"), "ok");
         else toast(t("channels.test_fail", { detail: r.detail || "" }), "err");
-        await render();
       } catch (e) { toast(errMsg(e), "err"); }
     },
     "dest.del": (el) => {
@@ -2276,8 +2479,10 @@
     "item.resend": async (el) => {
       try {
         const r = await api("/api/items/" + el.dataset.id + "/resend", { method: "POST", body: {} });
-        toast(r.ok ? t("archive.resend_ok") : t("archive.resend_fail"), r.ok ? "ok" : "err");
-        await render();
+        const resendMessage = r.ok ? t("archive.resend_ok") :
+          r.error_code === "image_required_unavailable" ? t("items.resendImageRequired") : t("archive.resend_fail");
+        toast(resendMessage, r.ok ? "ok" : "err");
+        await refreshArchiveItem(el.dataset.id);
       } catch (e) { toast(errMsg(e), "err"); }
     },
     "item.publish": async (el) => {
@@ -2297,13 +2502,15 @@
       if (!ids.length) { toast(t("an.selectDests"), "err"); return; }
       const result = await api("/api/items/" + el.dataset.id + "/resend", { method: "POST", body: { destination_ids: ids } });
       closeModal();
-      toast(result.ok ? t("archive.resend_ok") : t("archive.resend_fail"), result.ok ? "ok" : "err");
-      await render();
+      const resendMessage = result.ok ? t("archive.resend_ok") :
+        result.error_code === "image_required_unavailable" ? t("items.resendImageRequired") : t("archive.resend_fail");
+      toast(resendMessage, result.ok ? "ok" : "err");
+      await refreshArchiveItem(el.dataset.id);
     },
     "item.del": (el) => {
       confirmModal(t("archive.delete_confirm"), async () => {
         await api("/api/items/" + el.dataset.id, { method: "DELETE" });
-        await render();
+        await refreshArchiveItem(el.dataset.id);
       });
     },
     "archive.filter": (el) => {
@@ -2385,7 +2592,6 @@
     },
 
     /* creators / feedback */
-    "creator.edit": (el) => creatorModal(el.dataset.id),
     "creators.copy": async (el) => {
       const value = el.dataset.copy || "";
       try {
@@ -2485,7 +2691,7 @@
     S.theme = ["slate", "cyber", "emerald", "amber"].includes(storedTheme)
       ? storedTheme : ((meta.defaults && meta.defaults.theme) || "slate");
 
-    const version = "v" + (meta.version || "1.04");
+    const version = "v" + (meta.version || "1.06");
     const badge = $("#verBadge");
     const footer = $("#verFoot");
     if (badge) badge.textContent = version;

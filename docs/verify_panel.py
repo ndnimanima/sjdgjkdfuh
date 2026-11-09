@@ -1,4 +1,4 @@
-"""Responsive SPA smoke check for Rozaneh v1.04.
+"""Responsive SPA smoke check for Rozaneh v1.06.
 
 Logs in, visits every first-level panel route at several viewport widths, checks
 for horizontal overflow or JavaScript errors, then verifies language/theme toggles
@@ -56,14 +56,68 @@ async def run(base: str, password: str, shots: str | None) -> int:
         await page.wait_for_selector(".stats", timeout=20000)
         check("login and dashboard boot", True)
 
+        async def check_internal_scroll(width: int, height: int, *, desktop: bool) -> None:
+            await page.set_viewport_size({"width": width, "height": height})
+            await page.evaluate(
+                """() => { const view = document.querySelector('#view'); if (view) view.style.minHeight = '1800px'; }"""
+            )
+            before = await page.evaluate(
+                """() => ({
+                    topbar: document.querySelector('.topbar').getBoundingClientRect().top,
+                    sidebar: document.querySelector('.sidebar').getBoundingClientRect().top,
+                    window: window.scrollY
+                })"""
+            )
+            await page.locator("#main").evaluate("el => { el.scrollTop = 700; }")
+            await page.wait_for_timeout(80)
+            after = await page.evaluate(
+                """() => ({
+                    main: document.querySelector('#main').scrollTop,
+                    topbar: document.querySelector('.topbar').getBoundingClientRect().top,
+                    sidebar: document.querySelector('.sidebar').getBoundingClientRect().top,
+                    window: window.scrollY,
+                    pageHeight: document.documentElement.scrollHeight,
+                    viewport: window.innerHeight
+                })"""
+            )
+            check(
+                f"content pane scrolls independently at {width}px",
+                after["main"] >= 500 and after["window"] == 0 and after["pageHeight"] <= after["viewport"] + 1,
+                str(after),
+            )
+            check(
+                f"top bar stays fixed at {width}px",
+                abs(after["topbar"] - before["topbar"]) < 1,
+                f"topbar moved from {before['topbar']} to {after['topbar']}",
+            )
+            if desktop:
+                check(
+                    "desktop navigation stays fixed",
+                    abs(after["sidebar"] - before["sidebar"]) < 1,
+                    f"sidebar moved from {before['sidebar']} to {after['sidebar']}",
+                )
+            await page.evaluate(
+                """() => { const view = document.querySelector('#view'); if (view) view.style.minHeight = ''; document.querySelector('#main').scrollTop = 0; }"""
+            )
+
+        await check_internal_scroll(1440, 900, desktop=True)
+        await check_internal_scroll(390, 844, desktop=False)
+
         before_lang = await page.evaluate("document.documentElement.lang")
         await page.click("#langBtn")
         await page.wait_for_function("lang => document.documentElement.lang !== lang", arg=before_lang)
         check("language toggle updates document direction", True)
+        await page.click("#langBtn")
+        await page.wait_for_function("lang => document.documentElement.lang === lang", arg=before_lang)
+        check("language toggle restores original preference", True)
 
+        palette_closed = await page.locator("#themePopover").evaluate("el => el.hidden")
+        check("theme colors start tucked behind the palette button", palette_closed)
+        await page.click("#themeToggle")
+        await page.wait_for_function("!document.querySelector('#themePopover').hidden")
         await page.click('#themeSwitch [data-t="amber"]')
         await page.wait_for_function("document.documentElement.dataset.theme === 'amber'")
-        check("theme toggle selects amber", True)
+        check("theme toggle selects amber and closes the palette", await page.locator("#themePopover").evaluate("el => el.hidden"))
 
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})

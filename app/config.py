@@ -1,4 +1,4 @@
-"""Rozaneh — runtime configuration (v1.04).
+"""Rozaneh — runtime configuration (v1.06).
 
 Environment driven so the same image runs on Railway, Docker, Render, Fly.io,
 Koyeb, Liara, Shiprr or any Linux VPS. Nothing secret ever lives in the repository.
@@ -13,7 +13,7 @@ APP_NAME = "Rozaneh"
 APP_NAME_FA = "روزنه"
 APP_TAGLINE = "Smart News & Media Pipeline to Channels"
 APP_TAGLINE_FA = "پایش هوشمند خبر و تحلیل لینک تا انتشار خودکار در کانال"
-VERSION = "1.04"
+VERSION = "1.06"
 VERSION_STEP = 0.01  # every release bumps the version by one hundredth
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,6 +21,7 @@ STATIC_DIR = BASE_DIR / "static"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR / "data"))).expanduser()
 DB_PATH = DATA_DIR / "rozaneh.db"
+GENERATED_IMAGES_DIR = DATA_DIR / "generated_images"
 
 DEFAULT_TZ = os.environ.get("DEFAULT_TZ", "Asia/Tehran")
 

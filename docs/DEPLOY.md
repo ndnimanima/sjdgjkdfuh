@@ -1,4 +1,4 @@
-# Rozaneh v1.04 — deployment guide
+# Rozaneh v1.06 — deployment guide
 
 This guide covers persistent deployment of the Python application, HTTPS, first login, Cloudflare edge proxying, backups, and health checks.
 
@@ -13,7 +13,7 @@ Before exposing a panel publicly:
 3. Set `COOKIE_SECURE=1` when users access the panel over HTTPS.
 4. Keep one scheduler-enabled app instance. Multiple replicas each run their own scheduler and can duplicate sends.
 5. Use HTTPS; avoid publishing the admin port directly to the public internet without a TLS proxy.
-6. Back up `/data/rozaneh.db` and restrict access to the backup. It contains configuration and messaging credentials.
+6. Back up `/data/rozaneh.db` and, if you use AI-generated fallback images, `/data/generated_images`. Restrict access to backups; the database contains configuration and messaging credentials.
 
 Common production variables:
 
@@ -39,7 +39,7 @@ PORT=8080
    - `SCHEDULER_ENABLED=1`
 5. Generate a public HTTPS domain. Railway injects `PORT`; the container binds to `0.0.0.0` and uses it.
 6. Open the generated domain, sign in, then change the password in **Settings → Security**.
-7. Verify `https://YOUR-DOMAIN/healthz` returns JSON with `"ok": true` and version `1.04`.
+7. Verify `https://YOUR-DOMAIN/healthz` returns JSON with `"ok": true` and version `1.06`.
 
 `railway.toml` points Railway to the Dockerfile and health endpoint. Do not scale to multiple scheduler-enabled replicas unless you first add a distributed scheduler/locking strategy.
 
@@ -89,14 +89,14 @@ Compose creates a named volume called `rozaneh_data`. To use another host port, 
 ### Plain Docker
 
 ```bash
-docker build -t rozaneh:1.04 .
+docker build -t rozaneh:1.06 .
 docker volume create rozaneh_data
 docker run -d --name rozaneh --restart unless-stopped \
   -p 8080:8080 -v rozaneh_data:/data \
   -e DATA_DIR=/data -e PORT=8080 \
   -e ADMIN_PASSWORD='use-a-long-unique-password' \
   -e DEFAULT_TZ=Asia/Tehran -e COOKIE_SECURE=0 \
-  rozaneh:1.04
+  rozaneh:1.06
 ```
 
 For a public HTTPS deployment behind a reverse proxy, use `COOKIE_SECURE=1`; keep the app port private to the proxy when possible.
@@ -181,16 +181,18 @@ DATA_DIR=/tmp/rozaneh-smoke ADMIN_PASSWORD=rozaneh COOKIE_SECURE=0 SCHEDULER_ENA
   uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-In a second shell, run the isolated offline API smoke test, then use Playwright and Chromium for the browser checks:
+Run the offline news-summary, pipeline, and API tests first. Then use Playwright and Chromium for the browser checks:
 
 ```bash
+python docs/news_quality_smoke.py
+python docs/pipeline_quality_smoke.py
 python docs/api_smoke.py
 DATA_DIR=/tmp/rozaneh-smoke python docs/smoke_ui.py
 python docs/verify_panel.py --base http://127.0.0.1:8080
 python docs/login_check.py --base http://127.0.0.1:8080 --engines chromium
 ```
 
-The main smoke test signs in with `rozaneh`, exercises feed/topic/channel/job CRUD, archive filtering and preview, translation, settings, and export. `verify_panel.py` checks all panel routes and responsive layouts (320–1440 px); `login_check.py` probes the sign-in layout in Persian and English. It removes the temporary entities it creates and seeds one synthetic archive row directly into the disposable SQLite database because the app has no public create-item route. A few checks require outbound access to the test feed URL and translation service; the test runs jobs in dry-run mode and never sends a channel post. Do not run it against production or a database with valuable state.
+The offline news tests verify extractive multi-sentence summaries, filtering of thin source copy, and photo-caption sizing; the API test uses a temporary database. The browser smoke test signs in with `rozaneh`, exercises feed/topic/channel/job CRUD, archive filtering and preview, translation, settings, and export. `verify_panel.py` checks all panel routes and responsive layouts (320–1440 px), including the fixed menu and internal content scroll; `login_check.py` probes the sign-in layout in Persian and English. The browser test removes the temporary entities it creates and seeds one synthetic archive row directly into the disposable SQLite database because the app has no public create-item route. A few browser checks require outbound access to the test feed URL and translation service; jobs run in dry-run mode and never send a channel post. Do not run it against production or a database with valuable state.
 
 ## 9. Backups and upgrades
 

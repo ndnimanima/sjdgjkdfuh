@@ -1,4 +1,4 @@
-/* Rozaneh v1.04 — Neo-Aurora Editorial Design System
+/* Rozaneh v1.06 — Neo-Aurora Editorial Design System
  * Four cohesive themes:
  *   slate   — Aurora Dark (deep midnight + indigo/cyan aurora)
  *   cyber   — Cyber Obsidian (carbon black + electric cyan/violet)
@@ -218,11 +218,14 @@ code, pre, .mono {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
 
-/* ── App Shell ──────────────────────────────────────────────────────────── */
+/* ── App Shell: fixed navigation, scrollable content pane ────────────────── */
 .app {
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -232,9 +235,10 @@ code, pre, .mono {
   border-inline-end: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   z-index: 30;
 }
 
@@ -285,8 +289,10 @@ code, pre, .mono {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .nav-group {
   font-size: 10.5px;
@@ -389,14 +395,16 @@ html[dir="rtl"] .nav a.active {
 /* ── Main Column & Topbar ───────────────────────────────────────────────── */
 .shell {
   min-width: 0;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  overflow: hidden;
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
+  position: relative;
+  flex: 0 0 auto;
   z-index: 25;
   background: color-mix(in srgb, var(--bg) 80%, transparent);
   backdrop-filter: blur(16px);
@@ -433,35 +441,64 @@ html[dir="rtl"] .nav a.active {
 }
 .top-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-.theme-switch {
-  display: inline-flex;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 3px;
-  gap: 3px;
-}
-.theme-dot {
-  width: 24px;
-  height: 24px;
-  border-radius: 8px;
-  border: 2px solid transparent;
-  padding: 0;
+.theme-switch { position: relative; display: inline-flex; }
+.theme-trigger { width: 38px; height: 38px; padding: 0; display: grid; place-items: center; }
+.theme-trigger svg { width: 18px; height: 18px; }
+.theme-popover {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 8px);
+  inset-inline-end: 0;
+  min-width: 166px;
   display: grid;
-  place-items: center;
+  gap: 3px;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 13px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+}
+.theme-popover[hidden] { display: none; }
+.theme-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text-soft);
+  background: transparent;
+  text-align: start;
+  font-size: 11.5px;
+  font-weight: 650;
+  transition: background .15s, border-color .15s;
+}
+.theme-choice:hover, .theme-choice.active { color: var(--text); background: var(--brand-soft); }
+.theme-choice.active { border-color: color-mix(in srgb, var(--brand) 40%, var(--border)); }
+.theme-dot {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
   transition: transform .15s, border-color .15s;
 }
-.theme-dot:hover { transform: scale(1.08); }
-.theme-dot[data-t="slate"]   { background: linear-gradient(135deg, #0f172a 45%, #6366f1 100%); }
-.theme-dot[data-t="cyber"]   { background: linear-gradient(135deg, #070b16 40%, #06b6d4 75%, #a855f7 100%); }
-.theme-dot[data-t="emerald"] { background: linear-gradient(135deg, #06281e 45%, #10b981 100%); }
-.theme-dot[data-t="amber"]   { background: linear-gradient(135deg, #ffffff 45%, #4f46e5 100%); }
-.theme-dot.active {
-  border-color: var(--text);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-}
+.theme-choice:hover .theme-dot { transform: scale(1.06); }
+.theme-choice[data-t="slate"] .theme-dot   { background: linear-gradient(135deg, #0f172a 45%, #6366f1 100%); }
+.theme-choice[data-t="cyber"] .theme-dot   { background: linear-gradient(135deg, #070b16 40%, #06b6d4 75%, #a855f7 100%); }
+.theme-choice[data-t="emerald"] .theme-dot { background: linear-gradient(135deg, #06281e 45%, #10b981 100%); }
+.theme-choice[data-t="amber"] .theme-dot   { background: linear-gradient(135deg, #ffffff 45%, #4f46e5 100%); }
+.theme-choice.active .theme-dot { border-color: var(--text); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
 
 .content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 24px 28px 56px;
   max-width: 1400px;
   width: 100%;
@@ -997,10 +1034,53 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 /* ── Smart Link & Video Analyzer Studio ─────────────────────────────────── */
 .analyzer-studio {
   display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
   gap: 20px;
   align-items: start;
 }
+.analyzer-options { display: flex; flex-wrap: wrap; gap: 7px; margin: 2px 0 10px; }
+.analyzer-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-soft);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.analyzer-option input { width: 14px; height: 14px; accent-color: var(--brand); margin: 0; }
+.analyzer-submit { min-height: 40px; }
+.analysis-draft { min-height: 118px; max-height: 230px; resize: vertical; }
+.analyzer-ai-settings { margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--border); }
+.analyzer-ai-settings > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+.analyzer-ai-settings > summary::-webkit-details-marker { display: none; }
+.ai-settings-title { display: inline-flex; align-items: center; gap: 7px; }
+.ai-settings-title svg { width: 16px; height: 16px; color: var(--brand); }
+.analyzer-ai-body { padding-top: 12px; }
+.ai-subhead { display: flex; align-items: center; gap: 7px; margin: 3px 0 10px; color: var(--brand); font-size: 12px; font-weight: 750; }
+.ai-subhead svg { width: 15px; height: 15px; }
+.ai-image-subhead { margin-top: 17px; }
+.analyzer-ai-toggle { display: flex; align-items: center; gap: 9px; margin: 9px 0 12px; font-size: 11.5px; color: var(--text-soft); }
+.analyzer-ai-toggle .chip { margin-inline-start: auto; }
+.analyzer-ai-actions { display: flex; align-items: center; gap: 7px; margin-top: 11px; }
+.analyzer-ai-settings .tiny.mute { line-height: 1.65; margin-bottom: 10px; }
+.an-details-summary { display: flex; align-items: center; gap: 7px; color: var(--brand); font-size: 12.5px; font-weight: 750; }
+.an-details-summary svg { width: 16px; height: 16px; }
+.an-section[open] .analysis-longtext, .an-section[open] .stack { margin-top: 10px; }
 .media-card-cover {
   position: relative;
   border-radius: 14px;
@@ -1288,6 +1368,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
     inset-block: 0;
     inset-inline-start: 0;
     width: 276px;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
     transform: translateX(110%);
     transition: transform .22s ease;
     box-shadow: var(--shadow-lg);
@@ -1308,7 +1391,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   .page-sub { display: none; }
 }
 
-/* ── v1.04 component compatibility & polish ──────────────────────────────── */
+/* ── v1.06 component compatibility & polish ──────────────────────────────── */
 .page-intro {
   display: flex;
   align-items: flex-end;

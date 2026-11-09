@@ -1,29 +1,18 @@
-# Clean GitHub upload for Rozaneh v1.04
+# Manual GitHub upload for Rozaneh v1.06
 
-The clean release package is meant to be extracted and uploaded as source. It deliberately excludes `.git` history, `.env`, SQLite/runtime data, Python caches, Wrangler cache, and obsolete generated UI screenshots.
+This release package is intended to be extracted and uploaded through GitHub's web UI. The ZIP excludes `.git` history, `.env`, SQLite/runtime data, Python caches, Wrangler cache, and obsolete generated UI screenshots. **Upload the extracted project contents—not the ZIP itself.**
 
-## Recommended: create a clean GitHub repository
+## Upload through GitHub's web UI
 
-1. Download and extract `rozaneh-v1.04-github-upload.zip` (uploading the ZIP itself to GitHub will only store the ZIP as a file).
-2. Create an empty repository on GitHub. Do not initialize it with a README, license, or `.gitignore` because these are already included.
-3. From the extracted project directory, run:
+1. Download `rozaneh-v1.06-github-upload.zip` and extract it on your computer.
+2. Create an empty GitHub repository, or open the existing repository and select the branch you intend to update.
+3. Choose **Add file → Upload files** and upload the extracted project files. On an existing repository, matching source files will be replaced. Include hidden files—especially `.gitignore` and `.github/workflows/ci.yml`—if they are not already present.
+4. Review the file list before committing. It must not include `.env`, `data/rozaneh.db`, bot tokens, API keys, or generated image-cache files.
+5. Enter a clear commit message such as `Release Rozaneh v1.06` and commit the upload in GitHub.
+6. If a hosting service is connected to that branch, check its build/deploy status yourself. Keep the existing persistent volume attached; do not reset or delete production data during a code update.
 
-   ```bash
-   git init -b main
-   git add -A
-   git diff --cached --check
-   git status --short
-   git commit -m "Release Rozaneh v1.04"
-   git remote add origin https://github.com/OWNER/REPOSITORY.git
-   git push -u origin main
-   ```
+## Important: check old Git history
 
-   Replace `OWNER/REPOSITORY` with the destination you control. Review `git status` before committing and make sure no real `.env`, SQLite database, bot token, or API key has been added.
+An earlier version of this repository tracked `data/rozaneh.db`, which can contain authentication sessions and destination credentials. The v1.06 source package excludes the database, but replacing files through GitHub's web UI does **not** erase a previously committed database blob from Git history.
 
-You can also extract the archive locally and use GitHub's **Add file → Upload files** with the extracted files (not the ZIP file).
-
-## Important: do not push the old Git history blindly
-
-An earlier version of this repository tracked `data/rozaneh.db`. The local database contains authentication sessions and destination credentials. The v1.04 working tree now stages that file for removal and ignores future database files, and the clean upload archive contains no database. However, a normal commit does **not** erase a previously committed database blob from Git history.
-
-If any values in that old database were real, revoke/rotate the affected credentials. To publish safely, use the clean archive in a new repository, or have an administrator carefully purge the sensitive file from all history and coordinate the resulting force-push with collaborators. Do not push the existing `.git` history until that review is complete.
+If values in an old database were real, revoke or rotate the affected credentials. If sensitive data was ever committed, use a new clean repository or have an administrator carefully purge it from all history before any history rewrite. Do not upload or publish an old `.git` directory without reviewing it.

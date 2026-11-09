@@ -539,7 +539,14 @@ async def extract_any_url(url: str, custom_text: str = "") -> dict[str, Any]:
 
 
 def _active_llm() -> tuple[str, str, str] | None:
-    """Return (base_url, model, api_key) if DeepSeek or OpenAI key is set."""
+    """Return the dedicated analysis API, falling back to existing translation keys."""
+    analysis_key = (db.get_setting("analysis_api_key") or "").strip()
+    if analysis_key:
+        return (
+            db.get_setting("analysis_api_base_url") or "https://api.openai.com/v1",
+            db.get_setting("analysis_api_model") or "gpt-4o-mini",
+            analysis_key,
+        )
     provider = db.get_setting("translate_provider") or "deepseek"
     ds_key = (db.get_setting("deepseek_api_key") or "").strip()
     oa_key = (db.get_setting("openai_api_key") or "").strip()
@@ -583,6 +590,26 @@ async def _llm_chat(base_url: str, model: str, api_key: str, system: str, user: 
         raise RuntimeError(f"llm_http_{resp.status_code}")
     data = resp.json()
     return (data["choices"][0]["message"]["content"] or "").strip()
+
+
+async def test_llm_connection() -> dict[str, Any]:
+    """Check the configured chat-completions endpoint without exposing its key."""
+    cfg = _active_llm()
+    if not cfg:
+        return {"ok": False, "error": "analysis_api_missing"}
+    base_url, model, api_key = cfg
+    try:
+        response = await _llm_chat(
+            base_url,
+            model,
+            api_key,
+            "Reply with the single word OK.",
+            "Connection test. Reply with OK only.",
+            timeout=20.0,
+        )
+        return {"ok": bool(response), "model": model, "response": response[:80]}
+    except Exception as exc:  # noqa: BLE001 — return a short, key-safe diagnostic
+        return {"ok": False, "model": model, "error": str(exc)[:180] or exc.__class__.__name__}
 
 
 def _build_timed_chunks(data: dict, max_chunk_chars: int = 14000, max_chunks: int = 6) -> list[tuple[str, str]]:
@@ -858,14 +885,16 @@ async def run_analysis_task(aid: int, url: str, custom_text: str = "") -> dict:
         )
 
         llm_cfg = _active_llm()
-        result: dict[str, Any] | None = None
         if llm_cfg and (raw_text or extracted.get("title")):
+            _update_analysis(aid, analysis_mode="ai")
             try:
                 result = await _analyze_with_llm(aid, extracted, llm_cfg)
-            except Exception:
-                result = None
-
-        if result is None:
+            except Exception as exc:
+                # Do not silently label a keyless extraction as an AI analysis
+                # when the user's configured provider failed.
+                raise RuntimeError(f"خطای API تحلیل هوشمند: {str(exc)[:240]}") from exc
+        else:
+            _update_analysis(aid, analysis_mode="extractive")
             result = await _analyze_keyless(aid, extracted)
 
         final_title = result.get("title_fa") or extracted.get("title") or url
@@ -981,8 +1010,8 @@ async def publish_analysis(
         if want_img and publish.supports_photo(platform):
             cap = _compose(publish.platform_limit(platform, "caption"))
             ok, detail = await publish.send_photo(dest, row["image"], cap)
-            if not ok:
-                ok, detail = await publish.send_message(dest, _compose(publish.platform_limit(platform, "text")))
+            # Keep photo-enabled delivery honest: a failed photo is not silently
+            # republished as a text-only analyzer post.
         else:
             ok, detail = await publish.send_message(dest, _compose(publish.platform_limit(platform, "text")))
 

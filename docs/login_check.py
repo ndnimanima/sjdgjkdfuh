@@ -1,6 +1,6 @@
 """Sign-in page layout probe — every width, both directions, multiple engines.
 
-Checks the v1.04 login layout:
+Checks the v1.06 login layout:
   * the password field stays inside the card and does not collide with submit,
   * the submit button spans the card content width,
   * nothing overflows the viewport and no console errors appear.
