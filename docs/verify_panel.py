@@ -1,4 +1,4 @@
-"""Responsive SPA smoke check for Rozaneh v1.06.
+"""Responsive SPA smoke check for Rozaneh v1.08.
 
 Logs in, visits every first-level panel route at several viewport widths, checks
 for horizontal overflow or JavaScript errors, then verifies language/theme toggles

@@ -23,7 +23,7 @@ def seed_archive_fixture():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     summary = (
-        "Synthetic article content created by the Rozaneh v1.06 browser smoke test. "
+        "Synthetic article content created by the Rozaneh v1.08 browser smoke test. "
         "This fixture exercises archive filtering, safe message rendering, and the "
         "preview modal without downloading a feed, contacting a publisher, or posting anywhere."
     )

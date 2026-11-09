@@ -1,9 +1,10 @@
-"""Rozaneh — FastAPI application: panel API + SPA host (v1.06)."""
+"""Rozaneh — FastAPI application: panel API + SPA host (v1.08)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -23,20 +24,56 @@ from . import (
     publish,
     scheduler,
     security,
+    secret_store,
     topics as topics_mod,
     translate,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# Bot API credentials are part of Telegram request paths; suppress HTTPX request
+# lines so neither those URLs nor webhook URLs can enter application logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("rozaneh")
 
 STARTED_AT = time.time()
 _BG_TASKS: set[asyncio.Task] = set()
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_EVENTS: dict[tuple[str, str], list[float]] = {}
+_RATE_LIMIT_MAX_KEYS = 4096
+
+
+def _consume_rate_limit(scope: str, client_key: str, limit: int, window_seconds: int) -> bool:
+    now = time.monotonic()
+    key = (scope, client_key or "unknown")
+    with _RATE_LIMIT_LOCK:
+        recent = [stamp for stamp in _RATE_LIMIT_EVENTS.get(key, []) if now - stamp < window_seconds]
+        if len(recent) >= limit:
+            _RATE_LIMIT_EVENTS[key] = recent
+            return False
+        recent.append(now)
+        _RATE_LIMIT_EVENTS[key] = recent
+        if len(_RATE_LIMIT_EVENTS) > _RATE_LIMIT_MAX_KEYS:
+            for item, stamps in list(_RATE_LIMIT_EVENTS.items()):
+                if not stamps or now - stamps[-1] >= window_seconds:
+                    _RATE_LIMIT_EVENTS.pop(item, None)
+            if len(_RATE_LIMIT_EVENTS) > _RATE_LIMIT_MAX_KEYS:
+                oldest = min(
+                    _RATE_LIMIT_EVENTS,
+                    key=lambda item: _RATE_LIMIT_EVENTS[item][-1] if _RATE_LIMIT_EVENTS[item] else float("-inf"),
+                )
+                _RATE_LIMIT_EVENTS.pop(oldest, None)
+        return True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.get_conn()
+    secret_migration = secret_store.migrate_legacy_contact_bot_token()
+    if secret_migration == "encrypted_legacy":
+        logger.info("legacy contact-bot token migrated to encrypted storage")
+    elif secret_migration == "discarded_without_key":
+        logger.warning("discarded plaintext contact-bot token because encrypted storage is not configured")
     logger.info("Rozaneh %s starting — data dir %s", config.VERSION, config.DATA_DIR)
     scheduler.start()
     try:
@@ -60,6 +97,7 @@ if config.STATIC_DIR.exists():
     app.mount("/media/generated", StaticFiles(directory=str(config.GENERATED_IMAGES_DIR)), name="generated_images")
 
 auth = Depends(security.require_auth)
+creator_auth = Depends(security.require_creator_auth)
 
 
 def fail(code: str, status: int = 400) -> None:
@@ -71,6 +109,15 @@ def fail(code: str, status: int = 400) -> None:
 
 class LoginPayload(BaseModel):
     password: str
+
+
+class CreatorLoginPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class ContactBotTokenPayload(BaseModel):
+    bot_token: str = Field(default="", max_length=4096)
 
 
 class FeedPayload(BaseModel):
@@ -171,6 +218,13 @@ class AnalyzerPublishPayload(BaseModel):
     send_image: int | bool | None = None
 
 
+class AnalyzerModelsPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    provider: str = "openai_compatible"
+    base_url: str = Field(default="", max_length=500)
+    api_key: str = Field(default="", max_length=4096)
+
+
 class SettingsPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
     panel_title: str | None = None
@@ -189,6 +243,7 @@ class SettingsPayload(BaseModel):
     openai_base_url: str | None = None
     openai_model: str | None = None
     openai_api_key: str | None = None
+    analysis_api_provider: str | None = None
     analysis_api_base_url: str | None = None
     analysis_api_model: str | None = None
     analysis_api_key: str | None = None
@@ -252,10 +307,10 @@ class PreviewPayload(BaseModel):
 
 
 class FeedbackPayload(BaseModel):
-    kind: str = "message"
-    name: str = ""
-    contact: str = ""
-    message: str = ""
+    kind: str = Field(default="message", max_length=20)
+    name: str = Field(default="", max_length=60)
+    contact: str = Field(default="", max_length=80)
+    message: str = Field(default="", max_length=3500)
 
 
 class ImportPayload(BaseModel):
@@ -299,6 +354,13 @@ def destination_public(row: dict) -> dict:
     data = dict(row)
     data["bot_token"] = mask_secret(data.get("bot_token", ""))
     data["has_token"] = bool(row.get("bot_token"))
+    return data
+
+
+def destination_export(row: dict) -> dict:
+    """Keep destination settings portable without exporting stored credentials."""
+    data = dict(row)
+    data["bot_token"] = ""
     return data
 
 
@@ -361,8 +423,21 @@ def clean_schedule(value: str | list[str] | None) -> str:
 
 SECRET_SETTINGS = {
     "password_hash", "password_salt", "deepseek_api_key", "openai_api_key",
-    "analysis_api_key", "image_api_key",
+    "analysis_api_key", "image_api_key", "contact_bot_token", "contact_bot_encryption_key",
+    "feedback_webhook",
 }
+
+
+def _contact_bot_token() -> str:
+    # Creator-authenticated UI changes take precedence. UI-managed values are
+    # encrypted at rest; a deployment-provided value remains in the host secret
+    # store. The plaintext is never returned by an API response.
+    stored = db.get_setting("contact_bot_token")
+    if stored:
+        decrypted = secret_store.decrypt_contact_bot_token(stored)
+        if decrypted:
+            return decrypted
+    return (config.CONTACT_BOT_TOKEN or "").strip()
 
 
 def settings_public() -> dict:
@@ -374,6 +449,7 @@ def settings_public() -> dict:
         "openai_api_key": "openai_key_set",
         "analysis_api_key": "analysis_api_key_set",
         "image_api_key": "image_api_key_set",
+        "feedback_webhook": "feedback_webhook_set",
     }
     for key, flag in key_flags.items():
         # Never send credential fragments back to the browser; the boolean flag
@@ -540,6 +616,8 @@ async def patch_settings(payload: SettingsPayload, _: None = auth) -> dict:
         fail("theme_invalid")
     if data.get("language") and data["language"] not in {l["id"] for l in config.LANGUAGES}:
         fail("language_invalid")
+    if data.get("analysis_api_provider") and data["analysis_api_provider"] not in {"deepseek", "openai_compatible"}:
+        fail("analysis_api_provider_invalid")
 
     flags = {"translate_post_edit", "translate_preserve", "signature_enabled", "image_generation_enabled"}
     for key, value in data.items():
@@ -550,15 +628,103 @@ async def patch_settings(payload: SettingsPayload, _: None = auth) -> dict:
     return {"ok": True, "settings": settings_public()}
 
 
+@app.get("/api/creators/auth/session")
+async def creator_auth_session(request: Request) -> dict:
+    slot = security.creator_session_slot(request)
+    return {
+        "configured": security.creator_auth_configured(),
+        "authenticated": slot is not None,
+    }
+
+
+@app.post("/api/creators/auth/login")
+async def creator_login(payload: CreatorLoginPayload, request: Request) -> JSONResponse:
+    if not security.creator_auth_configured():
+        await asyncio.sleep(0.3)
+        fail("creator_auth_unconfigured", 503)
+    client_key = request.client.host if request.client else "unknown"
+    if not _consume_rate_limit("creator_login", client_key, limit=8, window_seconds=300):
+        await asyncio.sleep(0.3)
+        fail("creator_auth_rate_limited", 429)
+    slot = security.authenticate_creator(payload.username, payload.password)
+    if slot is None:
+        await asyncio.sleep(0.4)
+        fail("creator_auth_invalid", 401)
+    token = security.create_creator_session(slot, request.headers.get("user-agent", ""))
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        config.CREATOR_COOKIE_NAME,
+        token,
+        max_age=config.CREATOR_SESSION_DAYS * 86400,
+        httponly=True,
+        samesite="lax",
+        secure=config.COOKIE_SECURE,
+        path="/",
+    )
+    db.log(None, f"creator editor login ok (slot {slot})", level="auth", code="creator_login_ok")
+    return response
+
+
+@app.post("/api/creators/auth/logout")
+async def creator_logout(request: Request) -> JSONResponse:
+    token = security.creator_current_token(request)
+    if token:
+        security.destroy_creator_session(token)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(config.CREATOR_COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/api/creators/contact-bot")
+async def creator_contact_bot_status(_: int = creator_auth) -> dict:
+    return {
+        "configured": bool(_contact_bot_token()),
+        "recipient_count": len(config.CONTACT_TELEGRAM_RECIPIENTS),
+    }
+
+
+@app.put("/api/creators/contact-bot")
+async def creator_update_contact_bot(
+    payload: ContactBotTokenPayload,
+    _: int = creator_auth,
+) -> dict:
+    token = payload.bot_token.strip()
+    if token:
+        try:
+            stored_token = secret_store.encrypt_contact_bot_token(token)
+        except secret_store.SecretStorageUnavailable:
+            fail("contact_bot_storage_unconfigured", 503)
+    else:
+        stored_token = ""
+    db.set_setting("contact_bot_token", stored_token)
+    db.log(
+        None,
+        "contact Telegram bot token updated" if token else "stored contact Telegram bot token cleared",
+        level="auth",
+        code="contact_bot_token_updated" if token else "contact_bot_token_cleared",
+    )
+    return {"ok": True, "configured": bool(_contact_bot_token())}
+
+
 @app.get("/api/creators")
 async def get_creators(_: None = auth) -> dict:
     return {"creators": creators_public(), "edu": edu_public()}
 
 
 @app.patch("/api/creators")
-async def patch_creators(payload: CreatorsPayload, _: None = auth) -> dict:
-    # Team profiles are release metadata; ordinary panel users must not edit them.
-    fail("creators_read_only", 403)
+async def patch_creators(payload: CreatorsPayload, creator_slot: int = creator_auth) -> dict:
+    data = payload.model_dump(exclude_unset=True)
+    editable = set(db.CREATOR_DEFAULTS)
+    for key, value in data.items():
+        if key not in editable or value is None:
+            continue
+        text = str(value).strip()
+        limit = 6000 if "bio_" in key or key.startswith("edu_topics_") else 1200
+        if len(text) > limit:
+            fail("creator_field_too_long")
+        db.set_setting(key, text)
+    db.log(None, f"creator profile updated (slot {creator_slot})", level="auth", code="creator_profile_updated")
+    return {"ok": True, "creators": creators_public(), "edu": edu_public()}
 
 
 # ── feeds ───────────────────────────────────────────────────────────────────
@@ -1031,6 +1197,30 @@ async def test_analyzer_llm(_: None = auth) -> dict:
     return await analyzer.test_llm_connection()
 
 
+@app.post("/api/analyzer/models")
+async def analyzer_models(payload: AnalyzerModelsPayload, _: None = auth) -> dict:
+    """Discover models using the entered key without saving or returning it."""
+    provider = (payload.provider or "openai_compatible").strip().lower()
+    if provider == "deepseek":
+        base_url = analyzer.DEEPSEEK_API_BASE_URL
+        saved_key = db.get_setting("deepseek_api_key")
+    elif provider == "openai_compatible":
+        base_url = (payload.base_url or db.get_setting("analysis_api_base_url") or "").strip().rstrip("/")
+        saved_key = db.get_setting("openai_api_key")
+    else:
+        return {"ok": False, "error": "analysis_api_provider_invalid"}
+
+    parsed = urlparse(base_url)
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password
+            or parsed.query or parsed.fragment):
+        return {"ok": False, "error": "analysis_api_url_invalid"}
+
+    api_key = (payload.api_key or "").strip() or (db.get_setting("analysis_api_key") or "").strip() or (saved_key or "").strip()
+    if not api_key:
+        return {"ok": False, "error": "analysis_api_missing_key"}
+    return await analyzer.fetch_api_models(base_url, api_key)
+
+
 @app.post("/api/analyzer")
 async def create_analysis(payload: AnalyzerCreatePayload, _: None = auth) -> dict:
     url = (payload.url or "").strip()
@@ -1258,7 +1448,7 @@ async def admin_export(include_items: int = 0, _: None = auth) -> dict:
         "settings": {k: v for k, v in db.all_settings().items() if k not in SECRET_SETTINGS},
         "feeds": db.query("SELECT * FROM feeds ORDER BY sort_order, id"),
         "topics": db.query("SELECT * FROM topics ORDER BY id"),
-        "destinations": db.query("SELECT * FROM destinations ORDER BY id"),
+        "destinations": [destination_export(row) for row in db.query("SELECT * FROM destinations ORDER BY id")],
         "jobs": db.query("SELECT * FROM jobs ORDER BY id"),
         "creators": creators_public(),
         "edu": edu_public(),
@@ -1329,7 +1519,7 @@ async def admin_import(payload: ImportPayload, _: None = auth) -> dict:
                     row.get("name", ""),
                     row.get("platform", "telegram"),
                     row.get("chat_id", ""),
-                    row.get("bot_token", ""),
+                    "",  # Credentials are intentionally omitted from JSON backup/import.
                     row.get("topic_filter", ""),
                     row.get("footer", ""),
                     row.get("parse_mode", "HTML"),
@@ -1393,15 +1583,75 @@ async def admin_clear_archive(_: None = auth) -> dict:
     return {"ok": True, "deleted": items}
 
 
+async def _deliver_contact_to_telegram(kind: str, name: str, contact: str, message: str) -> dict[str, Any]:
+    import httpx
+
+    recipients = tuple(config.CONTACT_TELEGRAM_RECIPIENTS)
+    token = _contact_bot_token()
+    if not token:
+        return {"status": "not_configured", "configured": False, "sent": 0, "total": len(recipients)}
+    if not recipients:
+        return {"status": "failed", "configured": True, "sent": 0, "total": 0}
+
+    text = "\n".join(
+        [
+            "Rozaneh contact message",
+            f"Category: {kind}",
+            f"Name: {name or '—'}",
+            f"Contact: {contact or '—'}",
+            "",
+            message,
+        ]
+    )[:3900]
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    request_body = {"text": text, "disable_web_page_preview": True}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=4.0)) as client:
+        async def send_one(chat_id: str) -> tuple[bool, str]:
+            try:
+                response = await client.post(url, json={**request_body, "chat_id": chat_id})
+                if response.status_code >= 400:
+                    return False, str(response.status_code)
+                try:
+                    body = response.json()
+                except (ValueError, TypeError):
+                    return False, "bad_response"
+                return (isinstance(body, dict) and body.get("ok") is True), str(response.status_code)
+            except httpx.TimeoutException:
+                return False, "timeout"
+            except httpx.RequestError:
+                return False, "network"
+            except Exception:  # noqa: BLE001 — do not log the token-bearing URL or exception
+                return False, "delivery_error"
+
+        results = await asyncio.gather(*(send_one(chat_id) for chat_id in recipients))
+
+    sent = sum(1 for delivered, _status in results if delivered)
+    total = len(recipients)
+    status = "sent" if sent == total else "partial" if sent else "failed"
+    for chat_id, (delivered, http_status) in zip(recipients, results):
+        if not delivered:
+            logger.warning("contact Telegram delivery failed for recipient %s (%s)", chat_id, http_status)
+    db.log(None, f"contact Telegram delivery: {sent}/{total}", level="feedback", code=f"feedback_telegram_{status}")
+    return {"status": status, "configured": True, "sent": sent, "total": total}
+
+
 @app.post("/api/feedback")
-async def feedback(payload: FeedbackPayload) -> dict:
+async def feedback(payload: FeedbackPayload, request: Request) -> dict:
     message = (payload.message or "").strip()
     if len(message) < 3:
         fail("message_required")
+    client_key = request.client.host if request.client else "unknown"
+    if not _consume_rate_limit("feedback", client_key, limit=8, window_seconds=300):
+        fail("feedback_rate_limited", 429)
     kind = (payload.kind or "message").strip()[:20] or "message"
-    line = f"[{kind}] {payload.name.strip()[:60]} | {payload.contact.strip()[:80]} | {message}"
+    name = payload.name.strip()[:60]
+    contact = payload.contact.strip()[:80]
+    line = f"[{kind}] {name} | {contact} | {message}"
     db.log(None, line[:2000], level="feedback", code="feedback")
-    forwarded = False
+
+    telegram = await _deliver_contact_to_telegram(kind, name, contact, message)
+    webhook_forwarded = False
     hook = (db.get_setting("feedback_webhook") or "").strip()
     if hook.startswith(("http://", "https://")):
         try:
@@ -1414,15 +1664,21 @@ async def feedback(payload: FeedbackPayload) -> dict:
                         "app": "Rozaneh",
                         "version": config.VERSION,
                         "kind": kind,
-                        "name": payload.name.strip(),
-                        "contact": payload.contact.strip(),
+                        "name": name,
+                        "contact": contact,
                         "message": message,
                     },
                 )
-                forwarded = resp.status_code < 400
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("feedback webhook failed: %s", exc)
-    return {"ok": True, "forwarded": forwarded}
+                webhook_forwarded = resp.status_code < 400
+        except Exception:  # noqa: BLE001 — webhook URLs can contain private credentials
+            logger.warning("feedback webhook delivery failed")
+    return {
+        "ok": True,
+        "saved": True,
+        "forwarded": telegram["status"] == "sent",
+        "telegram": telegram,
+        "webhook_forwarded": webhook_forwarded,
+    }
 
 
 # ── misc ────────────────────────────────────────────────────────────────────

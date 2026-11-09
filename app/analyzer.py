@@ -29,6 +29,12 @@ IG_CODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
 TW_STATUS_RE = re.compile(r"(?:twitter\.com|x\.com)/([^/?#]+)/status/(\d+)")
 TG_POST_RE = re.compile(r"t\.me/(?:s/)?([A-Za-z0-9_]{4,})/(\d+)")
 
+DEEPSEEK_API_BASE_URL = "https://api.deepseek.com"
+LLM_ANALYSIS_TIMEOUT = 95.0
+LLM_CHUNK_TIMEOUT = 25.0
+LLM_FINAL_TIMEOUT = 38.0
+LLM_MAX_CHUNKS = 4
+
 STOPWORDS = {
     "the", "and", "for", "that", "this", "with", "you", "are", "was", "were", "have", "has",
     "had", "not", "but", "from", "they", "what", "when", "where", "which", "who", "will",
@@ -571,25 +577,84 @@ def _active_llm() -> tuple[str, str, str] | None:
     return None
 
 
-async def _llm_chat(base_url: str, model: str, api_key: str, system: str, user: str, timeout: float = 55.0) -> str:
+async def _llm_chat(base_url: str, model: str, api_key: str, system: str, user: str, timeout: float = 40.0) -> str:
+    timeout = max(1.0, min(float(timeout), 60.0))
     payload = {
         "model": model,
         "temperature": 0.25,
+        "max_tokens": 1800,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await asyncio.wait_for(
+                client.post(
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                ),
+                timeout=timeout,
+            )
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        raise
+    except httpx.RequestError:
+        raise
     if resp.status_code >= 400:
         raise RuntimeError(f"llm_http_{resp.status_code}")
-    data = resp.json()
-    return (data["choices"][0]["message"]["content"] or "").strip()
+    try:
+        data = resp.json()
+    except (ValueError, TypeError):
+        raise RuntimeError("analysis_api_bad_response")
+    if not isinstance(data, dict):
+        raise RuntimeError("analysis_api_bad_response")
+    choices = data.get("choices") or []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") or {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, list):
+        content = "\n".join(
+            str(part.get("text") or "") for part in content
+            if isinstance(part, dict) and part.get("text")
+        )
+    elif isinstance(content, dict):
+        content = content.get("text") or ""
+    if not isinstance(content, str) or not content.strip():
+        content = choice.get("text") or ""
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("analysis_api_empty_response")
+    return content.strip()
+
+
+async def fetch_api_models(base_url: str, api_key: str, timeout: float = 20.0) -> dict[str, Any]:
+    """Fetch model ids from an OpenAI-compatible /models endpoint, without persisting secrets."""
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            )
+        if response.status_code >= 400:
+            return {"ok": False, "error": f"models_http_{response.status_code}"}
+        body = response.json()
+        raw_models = body.get("data", []) if isinstance(body, dict) else []
+        models = sorted({
+            str(row.get("id", "")).strip()
+            for row in raw_models
+            if isinstance(row, dict) and str(row.get("id", "")).strip()
+        }) if isinstance(raw_models, list) else []
+        if not models:
+            return {"ok": False, "error": "analysis_api_models_empty"}
+        return {"ok": True, "models": models}
+    except httpx.TimeoutException:
+        return {"ok": False, "error": "analysis_api_timeout"}
+    except httpx.RequestError:
+        return {"ok": False, "error": "analysis_api_network"}
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "analysis_api_bad_response"}
 
 
 async def test_llm_connection() -> dict[str, Any]:
@@ -608,8 +673,17 @@ async def test_llm_connection() -> dict[str, Any]:
             timeout=20.0,
         )
         return {"ok": bool(response), "model": model, "response": response[:80]}
-    except Exception as exc:  # noqa: BLE001 — return a short, key-safe diagnostic
-        return {"ok": False, "model": model, "error": str(exc)[:180] or exc.__class__.__name__}
+    except httpx.TimeoutException:
+        return {"ok": False, "model": model, "error": "analysis_api_timeout"}
+    except httpx.RequestError:
+        return {"ok": False, "model": model, "error": "analysis_api_network"}
+    except Exception as exc:  # noqa: BLE001 — return only a key-safe, bounded diagnostic
+        detail = str(exc)
+        if re.fullmatch(r"llm_http_\d{3}", detail):
+            code = detail
+        else:
+            code = "analysis_api_failed"
+        return {"ok": False, "model": model, "error": code}
 
 
 def _build_timed_chunks(data: dict, max_chunk_chars: int = 14000, max_chunks: int = 6) -> list[tuple[str, str]]:
@@ -646,13 +720,17 @@ def _build_timed_chunks(data: dict, max_chunk_chars: int = 14000, max_chunks: in
     text = (data.get("text") or "").strip()
     if not text:
         return []
+    max_chunks = max(1, int(max_chunks))
+    n_chunks = min(max_chunks, max(1, math.ceil(len(text) / max_chunk_chars)))
+    chunk_size = math.ceil(len(text) / n_chunks)
     chunks: list[tuple[str, str]] = []
-    step = max(max_chunk_chars, math.ceil(len(text) / max_chunks))
-    for i in range(0, len(text), step):
-        piece = text[i : i + max_chunk_chars]
-        chunks.append((f"بخش {len(chunks) + 1}", piece))
-        if len(chunks) >= max_chunks:
-            break
+    for idx in range(n_chunks):
+        piece = text[idx * chunk_size : (idx + 1) * chunk_size]
+        if len(piece) > max_chunk_chars:
+            half = max_chunk_chars // 2
+            piece = piece[:half] + " … " + piece[-half:]
+        if piece:
+            chunks.append((f"بخش {idx + 1}", piece))
     return chunks
 
 
@@ -695,27 +773,92 @@ def _extractive_top_sentences(text: str, count: int = 5) -> list[str]:
     return [p[2] for p in picked]
 
 
+def _fallback_analysis_from_text(raw: str, data: dict) -> dict[str, Any]:
+    """Keep a usable plain-text model answer when a compatible API ignores JSON instructions."""
+    plain = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip(), flags=re.M).strip()
+    if len(plain) < 40:
+        raise RuntimeError("analysis_api_short_response")
+    title = str(data.get("title") or "خلاصه محتوا").strip()
+    sentences = [part.strip(" -*•\n\t") for part in re.split(r"(?<=[.!?؟۔])\s+|\n+", plain) if len(part.strip()) >= 35]
+    points = sentences[:5]
+    draft = f"🎬 {title}\n\n{plain[:2500]}"
+    return {
+        "title_fa": title,
+        "summary": plain[:3000],
+        "key_points": points,
+        "deep_analysis": "",
+        "timeline": [],
+        "channel_draft": draft[:3800],
+    }
+
+
+def _parse_llm_analysis(raw: str, data: dict) -> dict[str, Any]:
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip(), flags=re.M).strip()
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    candidate = match.group(0) if match else cleaned
+    try:
+        parsed = json.loads(candidate)
+    except (TypeError, ValueError):
+        return _fallback_analysis_from_text(cleaned, data)
+    if not isinstance(parsed, dict) or not str(parsed.get("summary") or "").strip():
+        return _fallback_analysis_from_text(cleaned, data)
+    title = str(parsed.get("title_fa") or data.get("title") or "").strip()
+    summary = str(parsed.get("summary") or "").strip()
+    key_points = [str(point).strip() for point in (parsed.get("key_points") or []) if str(point).strip()][:8]
+    timeline = [
+        {"time": str(entry.get("time") or ""), "text": str(entry.get("text") or "")}
+        for entry in (parsed.get("timeline") or [])
+        if isinstance(entry, dict) and entry.get("text")
+    ][:10]
+    channel_draft = str(parsed.get("channel_draft") or "").strip()
+    if not channel_draft:
+        channel_draft = f"🎬 {title}\n\n{summary}"
+        if key_points:
+            channel_draft += "\n\n📌 نکات کلیدی:\n" + "\n".join(f"▫️ {point}" for point in key_points[:5])
+    return {
+        "title_fa": title,
+        "summary": summary,
+        "key_points": key_points,
+        "deep_analysis": str(parsed.get("deep_analysis") or "").strip(),
+        "timeline": timeline,
+        "channel_draft": channel_draft[:3800],
+    }
+
+
 async def _analyze_with_llm(aid: int, data: dict, llm_cfg: tuple[str, str, str]) -> dict[str, Any]:
     base_url, model, api_key = llm_cfg
-    chunks = _build_timed_chunks(data, max_chunk_chars=13000, max_chunks=6)
+    chunks = _build_timed_chunks(data, max_chunk_chars=13000, max_chunks=LLM_MAX_CHUNKS)
 
     chunk_notes: list[str] = []
     if len(chunks) > 1:
-        for idx, (label, ctext) in enumerate(chunks, start=1):
-            _update_analysis(aid, progress_msg=f"در حال تحلیل هوشمند بخش {idx} از {len(chunks)} ({label})…")
-            note = await _llm_chat(
-                base_url,
-                model,
-                api_key,
-                "You are an expert Persian content analyst. Summarise this segment concisely in fluent Persian (4-6 bullet points), keeping exact facts, numbers and core arguments.",
-                f"عنوان: {data.get('title')}\nبازه زمانی/بخش: {label}\n\nمتن:\n{ctext}",
+        for start in range(0, len(chunks), 2):
+            batch = chunks[start:start + 2]
+            _update_analysis(
+                aid,
+                progress_msg=f"در حال تحلیل بخش‌های {start + 1} تا {start + len(batch)} از {len(chunks)}…",
             )
-            chunk_notes.append(f"### بازه {label}\n{note}")
+
+            async def summarize_chunk(item: tuple[str, str]) -> str:
+                label, text = item
+                return await _llm_chat(
+                    base_url,
+                    model,
+                    api_key,
+                    "You are an expert Persian content analyst. Summarise this segment concisely in fluent Persian (4-6 bullet points), keeping exact facts, numbers and core arguments.",
+                    f"عنوان: {data.get('title')}\nبازه زمانی/بخش: {label}\n\nمتن:\n{text}",
+                    timeout=LLM_CHUNK_TIMEOUT,
+                )
+
+            batch_results = await asyncio.gather(*(summarize_chunk(item) for item in batch), return_exceptions=True)
+            for (label, _), note in zip(batch, batch_results):
+                if isinstance(note, BaseException):
+                    raise note
+                chunk_notes.append(f"### بازه {label}\n{note}")
         combined_source = "\n\n".join(chunk_notes)
     else:
         combined_source = chunks[0][1] if chunks else (data.get("title") or "")
 
-    _update_analysis(aid, progress_msg="در حال تدوین خلاصه جامع، نکات کلیدی و پیش‌نویس کانال…")
+    _update_analysis(aid, progress_msg="در حال ساخت خروجی نهایی تحلیل…")
     dur_str = fmt_duration(data.get("duration_sec")) or "نامشخص"
     sys_prompt = (
         "You are a senior Persian media editor and analyst. "
@@ -736,22 +879,8 @@ async def _analyze_with_llm(aid: int, data: dict, llm_cfg: tuple[str, str, str])
         f"مدت زمان: {dur_str}\n\n"
         f"محتوا:\n{combined_source[:20000]}"
     )
-    raw_json = await _llm_chat(base_url, model, api_key, sys_prompt, user_prompt, timeout=65.0)
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json.strip(), flags=re.M)
-    m_obj = re.search(r"\{[\s\S]*\}", cleaned)
-    parsed = json.loads(m_obj.group(0) if m_obj else cleaned)
-    return {
-        "title_fa": str(parsed.get("title_fa") or "").strip(),
-        "summary": str(parsed.get("summary") or "").strip(),
-        "key_points": [str(x).strip() for x in (parsed.get("key_points") or []) if str(x).strip()][:8],
-        "deep_analysis": str(parsed.get("deep_analysis") or "").strip(),
-        "timeline": [
-            {"time": str(t.get("time") or ""), "text": str(t.get("text") or "")}
-            for t in (parsed.get("timeline") or [])
-            if isinstance(t, dict) and t.get("text")
-        ][:10],
-        "channel_draft": str(parsed.get("channel_draft") or "").strip(),
-    }
+    raw_json = await _llm_chat(base_url, model, api_key, sys_prompt, user_prompt, timeout=LLM_FINAL_TIMEOUT)
+    return _parse_llm_analysis(raw_json, data)
 
 
 async def _analyze_keyless(aid: int, data: dict) -> dict[str, Any]:
@@ -863,6 +992,42 @@ async def _analyze_keyless(aid: int, data: dict) -> dict[str, Any]:
     }
 
 
+def _analysis_error_detail(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "مهلت پاسخ API تحلیل تمام شد؛ مدل سریع‌تر یا متن کوتاه‌تری امتحان کنید."
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "مهلت کلی تحلیل هوشمند تمام شد؛ مدل سریع‌تر یا متن کوتاه‌تری انتخاب کنید."
+    if isinstance(exc, httpx.RequestError):
+        return "اتصال به API تحلیل برقرار نشد؛ نشانی API و دسترسی شبکهٔ سرور را بررسی کنید."
+    detail = str(exc).strip() or exc.__class__.__name__
+    known = {
+        "analysis_overall_timeout": "مهلت کلی تحلیل هوشمند تمام شد؛ متن کوتاه‌تر یا مدل سریع‌تری انتخاب کنید.",
+        "analysis_api_short_response": "پاسخ مدل خیلی کوتاه یا نامعتبر بود؛ مدل و تنظیمات endpoint را بررسی کنید.",
+        "analysis_api_empty_response": "مدل پاسخ متنی برنگرداند؛ مدل یا endpoint سازگار با Chat Completions انتخاب کنید.",
+        "analysis_api_bad_response": "پاسخ API قابل‌خواندن نبود؛ سازگاری endpoint و مدل را بررسی کنید.",
+    }
+    if detail in known:
+        return known[detail]
+    match = re.fullmatch(r"llm_http_(\d{3})", detail)
+    if match:
+        status = match.group(1)
+        messages = {
+            "400": "درخواست یا نام مدل پذیرفته نشد؛ مدل پشتیبانی‌شده را انتخاب کنید.",
+            "401": "کلید API نامعتبر است یا دسترسی ندارد.",
+            "402": "اعتبار حساب API کافی نیست (HTTP 402).",
+            "403": "دسترسی به مدل یا endpoint مجاز نیست.",
+            "404": "endpoint یا مدل پیدا نشد.",
+            "408": "مهلت درخواست در سمت ارائه‌دهنده تمام شد.",
+            "413": "متن ورودی برای API بیش از حد بزرگ است.",
+            "422": "مدل تنظیمات درخواست را نپذیرفت؛ مدل یا پارامترها را بررسی کنید.",
+            "429": "سهمیه یا محدودیت نرخ API فعال شده است.",
+        }
+        if status.startswith("5"):
+            return f"ارائه‌دهندهٔ تحلیل موقتاً خطای HTTP {status} برگرداند؛ بعداً دوباره امتحان کنید."
+        return messages.get(status, f"API خطای HTTP {status} برگرداند.")
+    return detail.replace("\n", " ")[:220]
+
+
 async def run_analysis_task(aid: int, url: str, custom_text: str = "") -> dict:
     """Full extraction + analysis pipeline updating DB record `aid`."""
     try:
@@ -886,13 +1051,20 @@ async def run_analysis_task(aid: int, url: str, custom_text: str = "") -> dict:
 
         llm_cfg = _active_llm()
         if llm_cfg and (raw_text or extracted.get("title")):
-            _update_analysis(aid, analysis_mode="ai")
+            _update_analysis(aid, analysis_mode="ai", progress_msg="محتوا آماده شد؛ تحلیل هوشمند در حال اجراست…")
             try:
-                result = await _analyze_with_llm(aid, extracted, llm_cfg)
+                result = await asyncio.wait_for(
+                    _analyze_with_llm(aid, extracted, llm_cfg),
+                    timeout=LLM_ANALYSIS_TIMEOUT,
+                )
+            except asyncio.TimeoutError as exc:
+                # The complete AI stage has one ceiling in addition to per-request
+                # timeouts, so provider latency cannot leave a job spinning for minutes.
+                raise RuntimeError("analysis_overall_timeout") from exc
             except Exception as exc:
                 # Do not silently label a keyless extraction as an AI analysis
                 # when the user's configured provider failed.
-                raise RuntimeError(f"خطای API تحلیل هوشمند: {str(exc)[:240]}") from exc
+                raise RuntimeError(_analysis_error_detail(exc)) from exc
         else:
             _update_analysis(aid, analysis_mode="extractive")
             result = await _analyze_keyless(aid, extracted)
@@ -915,7 +1087,7 @@ async def run_analysis_task(aid: int, url: str, custom_text: str = "") -> dict:
             aid,
             status="failed",
             progress_msg="",
-            error=str(exc)[:400],
+            error=_analysis_error_detail(exc)[:400],
         )
     return get_analysis_public(aid) or {"ok": False}
 

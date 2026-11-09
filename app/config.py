@@ -1,4 +1,4 @@
-"""Rozaneh — runtime configuration (v1.06).
+"""Rozaneh — runtime configuration (v1.08).
 
 Environment driven so the same image runs on Railway, Docker, Render, Fly.io,
 Koyeb, Liara, Shiprr or any Linux VPS. Nothing secret ever lives in the repository.
@@ -13,7 +13,7 @@ APP_NAME = "Rozaneh"
 APP_NAME_FA = "روزنه"
 APP_TAGLINE = "Smart News & Media Pipeline to Channels"
 APP_TAGLINE_FA = "پایش هوشمند خبر و تحلیل لینک تا انتشار خودکار در کانال"
-VERSION = "1.06"
+VERSION = "1.08"
 VERSION_STEP = 0.01  # every release bumps the version by one hundredth
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +31,23 @@ BOOTSTRAP_PASSWORD = os.environ.get("ROZANEH_PASSWORD") or os.environ.get("ADMIN
 SESSION_DAYS = int(os.environ.get("SESSION_DAYS", "7"))
 COOKIE_NAME = "rozaneh_session"
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
+
+# Creator-only profile editing. Both independent accounts must be configured
+# through the host's secret manager; there are deliberately no code defaults.
+CREATOR1_USERNAME = os.environ.get("CREATOR1_USERNAME", "").strip()
+CREATOR1_PASSWORD = os.environ.get("CREATOR1_PASSWORD", "")
+CREATOR2_USERNAME = os.environ.get("CREATOR2_USERNAME", "").strip()
+CREATOR2_PASSWORD = os.environ.get("CREATOR2_PASSWORD", "")
+CREATOR_SESSION_DAYS = int(os.environ.get("CREATOR_SESSION_DAYS", "7"))
+CREATOR_COOKIE_NAME = "rozaneh_creator_session"
+
+# The recipient IDs are public routing configuration; the bot token stays in
+# secure deployment config or the encrypted creator-authenticated settings.
+CONTACT_TELEGRAM_RECIPIENTS = ("7936961162", "143943288")
+CONTACT_BOT_TOKEN = os.environ.get("CONTACT_BOT_TOKEN", "").strip()
+# Required only when creators manage a token through the UI. Keep this Fernet
+# key in the host secret manager, separate from SQLite and its backups.
+CONTACT_BOT_ENCRYPTION_KEY = os.environ.get("CONTACT_BOT_ENCRYPTION_KEY", "").strip()
 
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "22"))
 USER_AGENT = os.environ.get(

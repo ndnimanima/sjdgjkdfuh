@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Rozaneh · روزنه — panel application (v1.06)
+   Rozaneh · روزنه — panel application (v1.08)
    Vanilla ES2019+, no build step, no external assets.
    ========================================================================== */
 (function () {
@@ -33,6 +33,7 @@
     settings: {},
     creators: [],
     edu: null,
+    creatorEditor: { configured: false, authenticated: false, botConfigured: false },
     archive: { status: "all", q: "" },
     draft: null,
   };
@@ -147,6 +148,7 @@
 
   const P = {
     grid: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    newspaper: '<path d="M4 3h16v18H4z"/><path d="M8 7h8M8 11h8M8 15h5"/><path d="M2 7v13a2 2 0 0 0 2 2"/>',
     rss: '<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.4"/>',
     tag: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.3"/>',
     send: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>',
@@ -246,7 +248,7 @@
     } catch (e) {
       throw new Error("network_error");
     }
-    if (res.status === 401) {
+    if (res.status === 401 && !path.startsWith("/api/creators/auth/")) {
       location.replace("/login");
       throw new Error("auth_required");
     }
@@ -342,6 +344,16 @@
     if (quickAnalyze) quickAnalyze.textContent = "✨ " + t("top.quickAnalyze");
     const refresh = $("#refreshBtn");
     if (refresh) refresh.title = t("top.refresh");
+    $$("[data-theme-label]").forEach((label) => {
+      label.textContent = t("theme.short." + label.dataset.themeLabel);
+    });
+    $$(".theme-choice[data-theme-title]").forEach((button) => {
+      const title = t("theme." + button.dataset.themeTitle);
+      button.title = title;
+      button.setAttribute("aria-label", title);
+    });
+    const themePopover = $("#themePopover");
+    if (themePopover) themePopover.setAttribute("aria-label", t("top.theme"));
     const live = $("#liveTxt");
     if (live) live.textContent = t("nav.live");
     renderNav();
@@ -698,6 +710,7 @@
   }
 
   let ANALYZER_POLL_TIMER = null;
+  let ANALYZER_MODEL_FETCH = null;
 
   function stopAnalyzerPolling() {
     if (ANALYZER_POLL_TIMER) clearTimeout(ANALYZER_POLL_TIMER);
@@ -748,6 +761,8 @@
     }
 
     const aiSettings = S.settings || {};
+    const analysisProvider = aiSettings.analysis_api_provider === "deepseek" ||
+      String(aiSettings.analysis_api_base_url || "").toLowerCase().includes("api.deepseek.com") ? "deepseek" : "openai_compatible";
     const aiReady = Boolean(aiSettings.analysis_api_key_set || aiSettings.deepseek_key_set || aiSettings.openai_key_set);
     const imageApiReady = String(aiSettings.image_generation_enabled || "0") === "1" && Boolean(aiSettings.image_api_key_set);
     const aiStatusText = aiReady ? t("an.aiConfigured") : t("an.aiMissing");
@@ -765,10 +780,14 @@
       '<div class="analyzer-ai-body"><p class="tiny mute">' + h(t("an.aiSettingsNote")) + '</p>' +
       '<form data-form="analyzer-ai" id="analyzerAiForm"><div class="ai-subhead">' + ico("book") + h(t("an.aiAnalysisProvider")) + '</div>' +
       '<div class="form-grid">' +
-      '<div class="field"><label for="analysisApiBase">' + h(t("an.aiBaseUrl")) + '</label><input class="input ltr" id="analysisApiBase" type="url" name="analysis_api_base_url" value="' + h(aiSettings.analysis_api_base_url || 'https://api.openai.com/v1') + '"></div>' +
-      '<div class="field"><label for="analysisApiModel">' + h(t("an.aiModel")) + '</label><input class="input ltr" id="analysisApiModel" type="text" name="analysis_api_model" value="' + h(aiSettings.analysis_api_model || 'gpt-4o-mini') + '"></div>' +
-      '<div class="field span2"><label for="analysisApiKey">' + h(t("an.aiApiKey")) + '</label><input class="input ltr" id="analysisApiKey" type="password" name="analysis_api_key" value="' + h(aiSettings.analysis_api_key || '') + '" placeholder="' + h(aiSettings.analysis_api_key_set ? t("settings.key_set") : 'sk-…') + '" autocomplete="off"></div>' +
-      '</div><div class="ai-subhead ai-image-subhead">' + ico("image") + h(t("an.aiImageProvider")) + '</div>' +
+      '<div class="field"><label for="analysisApiProvider">' + h(t("an.aiProvider")) + '</label><select class="input" id="analysisApiProvider" name="analysis_api_provider" data-act="analyzer.ai.provider">' +
+      '<option value="deepseek"' + (analysisProvider === "deepseek" ? ' selected' : '') + '>' + h(t("an.aiProviderDeepSeek")) + '</option>' +
+      '<option value="openai_compatible"' + (analysisProvider !== "deepseek" ? ' selected' : '') + '>' + h(t("an.aiProviderCustom")) + '</option></select></div>' +
+      '<div class="field"><label for="analysisApiBase">' + h(t("an.aiBaseUrl")) + '</label><input class="input ltr" id="analysisApiBase" type="url" name="analysis_api_base_url" data-act="analyzer.ai.basechange" value="' + h(aiSettings.analysis_api_base_url || 'https://api.openai.com/v1') + '"></div>' +
+      '<div class="field"><label for="analysisApiModel">' + h(t("an.aiModel")) + '</label><input class="input ltr" id="analysisApiModel" type="text" name="analysis_api_model" list="analysisApiModels" value="' + h(aiSettings.analysis_api_model || 'gpt-4o-mini') + '"><datalist id="analysisApiModels"></datalist></div>' +
+      '<div class="field span2"><label for="analysisApiKey">' + h(t("an.aiApiKey")) + '</label><input class="input ltr" id="analysisApiKey" type="password" name="analysis_api_key" data-act="analyzer.ai.keychange" value="' + h(aiSettings.analysis_api_key || '') + '" placeholder="' + h(aiSettings.analysis_api_key_set ? t("settings.key_set") : 'sk-…') + '" autocomplete="off"></div>' +
+      '</div><div class="tiny mute" id="analysisModelDiscoveryStatus" aria-live="polite">' + h(t("an.aiDiscoverNote")) + '</div>' +
+      '<div class="ai-subhead ai-image-subhead">' + ico("image") + h(t("an.aiImageProvider")) + '</div>' +
       '<p class="tiny mute">' + h(t("an.aiImageNote")) + '</p>' +
       '<div class="analyzer-ai-toggle">' + toggleEl("image_generation_enabled", String(aiSettings.image_generation_enabled || "0") === "1") + '<span>' + h(t("an.aiImageEnabled")) + '</span>' +
       '<span class="chip ' + (imageApiReady ? 'ok' : 'warn') + '" id="imageApiStatus">' + h(imageApiReady ? t("an.aiImageReady") : t("an.aiImageOptional")) + '</span></div>' +
@@ -776,7 +795,8 @@
       '<div class="field"><label for="imageApiBase">' + h(t("an.aiImageBaseUrl")) + '</label><input class="input ltr" id="imageApiBase" type="url" name="image_api_base_url" value="' + h(aiSettings.image_api_base_url || 'https://api.openai.com/v1') + '"></div>' +
       '<div class="field"><label for="imageApiModel">' + h(t("an.aiImageModel")) + '</label><input class="input ltr" id="imageApiModel" type="text" name="image_api_model" value="' + h(aiSettings.image_api_model || 'gpt-image-1') + '"></div>' +
       '<div class="field span2"><label for="imageApiKey">' + h(t("an.aiImageKey")) + '</label><input class="input ltr" id="imageApiKey" type="password" name="image_api_key" value="' + h(aiSettings.image_api_key || '') + '" placeholder="' + h(aiSettings.image_api_key_set ? t("settings.key_set") : 'sk-…') + '" autocomplete="off"></div>' +
-      '</div><div class="analyzer-ai-actions"><button type="button" class="btn btn-sm" data-act="analyzer.ai.save">' + ico("check") + '<span>' + h(t("an.aiSave")) + '</span></button>' +
+      '</div><div class="analyzer-ai-actions"><button type="button" class="btn btn-sm btn-ghost" data-act="analyzer.ai.models">' + ico("refresh") + '<span>' + h(t("an.aiDiscoverModels")) + '</span></button>' +
+      '<button type="button" class="btn btn-sm" data-act="analyzer.ai.save">' + ico("check") + '<span>' + h(t("an.aiSave")) + '</span></button>' +
       '<button type="button" class="btn btn-sm btn-ghost" data-act="analyzer.ai.test">' + ico("zap") + '<span>' + h(t("an.aiTest")) + '</span></button></div>' +
       '</form></div></details></div></section>';
 
@@ -834,6 +854,7 @@
     if (!form) throw new Error("analyzer_settings_missing");
     const values = fd(form);
     const patch = {
+      analysis_api_provider: values.analysis_api_provider,
       analysis_api_base_url: values.analysis_api_base_url,
       analysis_api_model: values.analysis_api_model,
       image_generation_enabled: tgVal(form, "image_generation_enabled"),
@@ -848,6 +869,80 @@
     S.settings = response.settings || S.settings;
     updateAnalyzerApiBadges();
     return S.settings;
+  }
+
+  function analyzerApiErrorText(error) {
+    const code = String(error || "unknown");
+    const status = code.match(/(?:llm|models)_http_(\d{3})/);
+    if (status) {
+      const mapped = {
+        "400": "an.aiHttp400", "401": "an.aiHttp401", "402": "an.aiHttp402",
+        "403": "an.aiHttp403", "404": "an.aiHttp404", "429": "an.aiHttp429",
+      };
+      if (mapped[status[1]]) return t(mapped[status[1]]);
+      if (Number(status[1]) >= 500) return t("an.aiHttp5xx");
+    }
+    const known = {
+      analysis_api_timeout: "an.aiApiTimeout",
+      analysis_api_network: "an.aiApiNetwork",
+      analysis_api_missing_key: "an.aiApiMissingKey",
+      analysis_api_models_empty: "an.aiModelsEmpty",
+      analysis_api_bad_response: "an.aiApiBadResponse",
+      analysis_api_url_invalid: "an.aiApiUrlInvalid",
+      analysis_api_provider_invalid: "an.aiApiProviderInvalid",
+      analysis_api_failed: "an.aiApiFailed",
+    };
+    return known[code] ? t(known[code]) : code;
+  }
+
+  async function discoverAnalyzerModels() {
+    if (ANALYZER_MODEL_FETCH) return ANALYZER_MODEL_FETCH;
+    const form = $("#analyzerAiForm");
+    const status = $("#analysisModelDiscoveryStatus");
+    const button = $('[data-act="analyzer.ai.models"]');
+    if (!form) return;
+    const values = fd(form);
+    const provider = values.analysis_api_provider || "openai_compatible";
+    const hasTypedKey = Boolean(String(values.analysis_api_key || "").trim());
+    const saved = S.settings || {};
+    const hasStoredKey = Boolean(saved.analysis_api_key_set ||
+      (provider === "deepseek" ? saved.deepseek_key_set : saved.openai_key_set));
+    if (!hasTypedKey && !hasStoredKey) {
+      if (status) status.textContent = t("an.aiApiMissingKey");
+      return;
+    }
+    if (status) status.textContent = t("an.aiDiscovering");
+    if (button) button.disabled = true;
+    const payload = {
+      provider: provider,
+      base_url: values.analysis_api_base_url || "",
+      api_key: String(values.analysis_api_key || "").trim(),
+    };
+    ANALYZER_MODEL_FETCH = (async () => {
+      try {
+        const result = await api("/api/analyzer/models", { method: "POST", body: payload });
+        if (!result.ok) {
+          if (status) status.textContent = t("an.aiDiscoverFail", { detail: analyzerApiErrorText(result.error) });
+          return result;
+        }
+        const models = (result.models || []).slice(0, 200);
+        const list = $("#analysisApiModels");
+        if (list) list.innerHTML = models.map((model) => '<option value="' + h(model) + '"></option>').join("");
+        const modelInput = $("#analysisApiModel");
+        if (modelInput && models.length && !models.includes(modelInput.value.trim())) {
+          modelInput.value = provider === "deepseek" && models.includes("deepseek-flash") ? "deepseek-flash" : models[0];
+        }
+        if (status) status.textContent = t("an.aiDiscoverOk", { count: models.length, model: modelInput ? modelInput.value : "" });
+        return result;
+      } catch (error) {
+        if (status) status.textContent = t("an.aiDiscoverFail", { detail: analyzerApiErrorText(error.message) });
+        return { ok: false, error: error.message || "unknown" };
+      } finally {
+        ANALYZER_MODEL_FETCH = null;
+        if (button && button.isConnected) button.disabled = false;
+      }
+    })();
+    return ANALYZER_MODEL_FETCH;
   }
 
   function renderAnalysisHistory(analyses) {
@@ -1637,7 +1732,7 @@
           '<option value="' + x.id + '"' + (x.id === s.language ? " selected" : "") + ">" + h(isFa() ? x.name_fa : x.name_en) + "</option>").join("") + "</select>") +
         '<div class="span2">' + field(t("settings.footer"), '<input type="text" name="global_footer" value="' + h(s.global_footer) + '" dir="auto">', t("settings.per_item_note")) + "</div>" +
         field(t("settings.max_chars"), '<input class="ltr" type="number" name="max_message_chars" min="400" max="4096" value="' + h(s.max_message_chars) + '">') +
-        field(t("settings.feedback_webhook"), '<input class="ltr" type="url" name="feedback_webhook" value="' + h(s.feedback_webhook || "") + '" placeholder="https://">', t("settings.feedback_hint")) +
+        field(t("settings.feedback_webhook"), '<input class="ltr" type="url" name="feedback_webhook" value="" placeholder="' + h(s.feedback_webhook_set ? t("settings.key_set") : "https://") + '">', t("settings.feedback_hint")) +
       "</div>" +
       '<div class="checkline">' + toggleEl("signature_enabled", Number(s.signature_enabled)) +
         '<span class="ct"><b>' + h(t("settings.signature")) + "</b></span></div>" +
@@ -1731,14 +1826,14 @@
     const rows = S.feeds.map((f, idx) => {
       const col = colorOf(f.color);
       return (
-        '<div class="frow" data-feed="' + f.id + '" style="grid-template-columns:34px minmax(0,1fr) 84px 96px 100px 132px">' +
-          '<div class="favatar" style="width:30px;height:30px;background:' + tint(col, .14) + ";border-color:" + tint(col, .4) + ";color:" + col + ';font-size:14px">' + h(f.icon) + "</div>" +
-          '<div class="fname"><b dir="auto">' + h(f.title) + '</b><span>' + h(f.url) + "</span></div>" +
-          '<input type="text" value="' + h(f.icon) + '" maxlength="4" dir="ltr" style="text-align:center;min-height:30px;padding:2px 4px" data-act="admin.icon" data-id="' + f.id + '" title="' + h(t("admin.icon")) + '">' +
-          '<div class="inline" style="gap:5px"><span class="color-dot" style="background:' + col + '"></span><select data-act="admin.color" data-id="' + f.id + '" style="min-height:30px;padding:2px 8px" title="' + h(t("admin.color")) + '">' +
-            Object.keys(COLORS).map((ck) => '<option value="' + ck + '"' + (ck === f.color ? " selected" : "") + ">" + ck + "</option>").join("") + "</select></div>" +
-          '<button class="toggle' + (Number(f.show_url) ? " on" : "") + '" data-act="admin.showurl" data-id="' + f.id + '" title="' + h(t("admin.show_url")) + '"></button>' +
-          '<div class="iact" style="justify-content:flex-end">' +
+        '<div class="frow admin-feed-row" data-feed="' + f.id + '">' +
+          '<div class="favatar admin-feed-avatar" style="width:30px;height:30px;background:' + tint(col, .14) + ";border-color:" + tint(col, .4) + ";color:" + col + ';font-size:14px">' + h(f.icon) + "</div>" +
+          '<div class="fname admin-feed-name"><b dir="auto">' + h(f.title) + '</b><span>' + h(f.url) + "</span></div>" +
+          '<label class="admin-feed-cell admin-feed-icon-edit"><span class="admin-feed-mobile-label">' + h(t("admin.icon")) + '</span><input type="text" value="' + h(f.icon) + '" maxlength="4" dir="ltr" style="text-align:center;min-height:30px;padding:2px 4px" data-act="admin.icon" data-id="' + f.id + '" title="' + h(t("admin.icon")) + '"></label>' +
+          '<label class="admin-feed-cell admin-feed-color"><span class="admin-feed-mobile-label">' + h(t("admin.color")) + '</span><span class="inline admin-feed-color-select"><span class="color-dot" style="background:' + col + '"></span><select data-act="admin.color" data-id="' + f.id + '" style="min-height:30px;padding:2px 8px" title="' + h(t("admin.color")) + '">' +
+            Object.keys(COLORS).map((ck) => '<option value="' + ck + '"' + (ck === f.color ? " selected" : "") + ">" + ck + "</option>").join("") + "</select></span></label>" +
+          '<div class="admin-feed-cell admin-feed-show-url"><span class="admin-feed-mobile-label">' + h(t("admin.show_url")) + '</span><button class="toggle' + (Number(f.show_url) ? " on" : "") + '" data-act="admin.showurl" data-id="' + f.id + '" title="' + h(t("admin.show_url")) + '"></button></div>' +
+          '<div class="iact admin-feed-actions">' +
             (idx > 0 ? iconBtn("arrowUp", "feed.up", f.id, "ghost", t("admin.move_up")) : "") +
             (idx < S.feeds.length - 1 ? iconBtn("arrowDown", "feed.down", f.id, "ghost", t("admin.move_down")) : "") +
             iconBtn("edit", "feed.edit", f.id, "ghost", t("common.edit")) +
@@ -1748,13 +1843,13 @@
     }).join("");
 
     return (
-      '<section class="card"><div class="card-head"><h2>' + ico("link") + h(t("nav.sub.only_links")) + "</h2>" +
+      '<section class="card"><div class="card-head"><h2 class="admin-feed-title">' + ico("newspaper") + h(t("admin.newsSources")) + "</h2>" +
         '<div class="btns">' + btn(t("feeds.bulk"), "feed.bulk", { cls: "ghost sm", icon: "layers" }) +
         btn(t("feeds.add"), "feed.new", { cls: "primary sm", icon: "plus" }) + "</div></div>" +
         '<div class="card-body"><div class="tiny mute" style="margin-bottom:12px">' + h(t("admin.links_hint")) + "</div></div>" +
         '<div class="card-body flush"><div class="rows">' +
         (S.feeds.length
-          ? '<div class="frow fhead" style="grid-template-columns:34px minmax(0,1fr) 84px 96px 100px 132px"><div></div><div>' + h(t("common.source")) +
+          ? '<div class="frow fhead admin-feed-head"><div></div><div>' + h(t("common.source")) +
             "</div><div>" + h(t("admin.icon")) + "</div><div>" + h(t("admin.color")) + "</div><div>" + h(t("admin.show_url")) +
             '</div><div style="text-align:end">' + h(t("common.actions")) + "</div></div>" + rows
           : emptyBox("link", t("feeds.empty"), t("feeds.empty_hint"))) +
@@ -1846,9 +1941,19 @@
   /* ── creators ─────────────────────────────────────────────────────────── */
 
   async function renderCreators(view) {
-    const data = await api("/api/creators");
+    const [data, editor] = await Promise.all([
+      api("/api/creators"),
+      api("/api/creators/auth/session"),
+    ]);
     S.creators = data.creators || [];
     S.edu = data.edu || {};
+    S.creatorEditor = Object.assign({ configured: false, authenticated: false, botConfigured: false }, editor || {});
+    if (S.creatorEditor.authenticated) {
+      const botStatus = await api("/api/creators/contact-bot");
+      S.creatorEditor.botConfigured = Boolean(botStatus.configured);
+      S.creatorEditor.botSource = botStatus.source || "";
+    }
+    const editorState = S.creatorEditor;
     const creatorCards = S.creators.map((creator) => {
       const name = creator.name ? creator.name.split("|").map((part) => part.trim())[isFa() ? 0 : 1] || creator.name : t("creators.slot", { n: creator.slot });
       const role = isFa() ? (creator.role_fa || "") : (creator.role_en || "");
@@ -1868,7 +1973,7 @@
         (quote ? '<blockquote class="creator-quote" dir="auto">' + h(quote) + '</blockquote>' : '') +
         (bio ? '<p class="creator-bio" dir="auto">' + h(bio) + '</p>' : '') +
         (skills.length ? '<div class="creator-skills">' + skills.map((skill) => '<span class="skill-chip">' + h(skill) + '</span>').join('') + '</div>' : '') +
-        '<div class="creator-links">' + links + '</div></article>';
+        '<div class="creator-links">' + links + (editorState.authenticated ? '<button class="btn btn-sm creator-edit" type="button" data-act="creator.edit" data-slot="' + creator.slot + '">' + ico("edit") + '<span>' + h(t("creators.editProfile")) + '</span></button>' : '') + '</div></article>';
     }).join("");
 
     const edu = S.edu || {};
@@ -1877,10 +1982,20 @@
     const telegramId = edu.telegram_id || "@nextgen_ain8n";
     const telegramUrl = edu.telegram_url || "https://t.me/nextgen_ain8n";
     const eduTopics = isFa() ? (edu.topics_fa || "") : (edu.topics_en || "");
-    const version = (S.meta && S.meta.version) || "1.06";
+    const version = (S.meta && S.meta.version) || "1.08";
+    let creatorActions = btn(t("creators.feedbackTitle"), "creators.bug", { cls: "ghost", icon: "message" });
+    if (editorState.authenticated) {
+      creatorActions = btn(t("creators.editorLogout"), "creator.logout", { cls: "ghost", icon: "logout" }) +
+        btn(t("creators.contactBot"), "creator.contactBot", { cls: "ghost", icon: "key" }) +
+        btn(t("creators.editEducation"), "creator.editEducation", { cls: "ghost", icon: "edit" }) + creatorActions;
+    } else if (editorState.configured) {
+      creatorActions = btn(t("creators.creatorLogin"), "creator.login", { cls: "primary", icon: "key" }) + creatorActions;
+    }
+    const editorSetupHint = !editorState.configured
+      ? '<div class="banner creator-editor-hint">' + ico("info") + '<span>' + h(t("creators.editorNotConfigured")) + '</span></div>'
+      : "";
 
-    view.innerHTML = pageHead(t("creators.title"), t("creators.sub"),
-      btn(t("creators.feedbackTitle"), "creators.bug", { cls: "ghost", icon: "message" })) +
+    view.innerHTML = pageHead(t("creators.title"), t("creators.sub"), creatorActions) + editorSetupHint +
       '<section class="hero-banner creators-hero"><div class="hero-top"><div><h2 class="hero-title">' + h(t("creators.heroBadge")) + '</h2>' +
       '<p class="hero-sub">' + h(t("creators.sub")) + '</p></div><span class="pill brand">Rozaneh v' + h(version) + '</span></div></section>' +
       '<div class="grid cols-2 creator-grid">' + (creatorCards || '<div class="empty">' + h(t("creators.empty")) + '</div>') + '</div>' +
@@ -1938,8 +2053,53 @@
     });
   }
 
+  function creatorLoginModal() {
+    openModal({
+      title: t("creators.editorLoginTitle"),
+      body: '<form class="form" data-form="creator-login" id="creatorLoginForm" autocomplete="on">' +
+        field(t("creators.username"), '<input class="input ltr" type="text" name="username" maxlength="128" autocomplete="username" required>') +
+        field(t("creators.password"), '<input class="input ltr" type="password" name="password" autocomplete="current-password" required>') +
+        '</form>',
+      footer: '<button class="btn ghost" data-act="modal.close">' + h(t("common.cancel")) + '</button>' +
+        '<button class="btn primary" data-act="submit" data-form-id="creatorLoginForm">' + ico("key") + '<span>' + h(t("creators.creatorLogin")) + '</span></button>',
+    });
+  }
+
+  function creatorEducationModal() {
+    const edu = S.edu || {};
+    openModal({
+      title: t("creators.editEducation"),
+      wide: true,
+      body: '<form class="form" data-form="creator-edu" id="creatorEduForm"><div class="form-grid">' +
+        field(t("creators.eduYoutubeId"), '<input class="input ltr" type="text" name="edu_youtube_id" value="' + h(edu.youtube_id || "") + '">') +
+        field(t("creators.eduYoutubeUrl"), '<input class="input ltr" type="url" name="edu_youtube_url" value="' + h(edu.youtube_url || "") + '">') +
+        field(t("creators.eduTelegramId"), '<input class="input ltr" type="text" name="edu_telegram_id" value="' + h(edu.telegram_id || "") + '">') +
+        field(t("creators.eduTelegramUrl"), '<input class="input ltr" type="url" name="edu_telegram_url" value="' + h(edu.telegram_url || "") + '">') +
+        '<div class="span2">' + field(t("creators.eduTopicsFa"), '<textarea class="input" name="edu_topics_fa" rows="3" dir="auto">' + h(edu.topics_fa || "") + '</textarea>') + '</div>' +
+        '<div class="span2">' + field(t("creators.eduTopicsEn"), '<textarea class="input ltr" name="edu_topics_en" rows="3" dir="ltr">' + h(edu.topics_en || "") + '</textarea>') + '</div>' +
+        '</div></form>',
+      footer: '<button class="btn ghost" data-act="modal.close">' + h(t("common.cancel")) + '</button>' +
+        '<button class="btn primary" data-act="submit" data-form-id="creatorEduForm">' + h(t("common.save")) + '</button>',
+    });
+  }
+
+  function creatorContactBotModal() {
+    const status = S.creatorEditor || {};
+    openModal({
+      title: t("creators.contactBot"),
+      body: '<div class="banner ' + (status.botConfigured ? 'ok' : '') + '">' + ico(status.botConfigured ? "check" : "info") + '<span>' +
+        h(t(status.botConfigured ? "creators.contactBotConfigured" : "creators.contactBotMissing")) + '</span></div>' +
+        '<form class="form" data-form="creator-contact-token" id="creatorContactBotForm">' +
+        field(t("creators.contactBotToken"), '<input class="input ltr" type="password" name="bot_token" autocomplete="new-password" placeholder="' + h(t(status.botConfigured ? "settings.key_set" : "creators.contactBotMissing")) + '" required>', t("creators.contactBotHint")) +
+        '</form>',
+      footer: '<button class="btn ghost" data-act="modal.close">' + h(t("common.cancel")) + '</button>' +
+        '<button class="btn primary" data-act="submit" data-form-id="creatorContactBotForm">' + ico("check") + '<span>' + h(t("common.save")) + '</span></button>',
+    });
+  }
+
   function feedbackModal(prefill) {
     openModal({
+
       title: t("creators.bug_report"),
       body:
         '<form data-form="feedback" id="bugForm">' +
@@ -2099,7 +2259,7 @@
       if (v.language) body.language = v.language;
       if (v.global_footer !== undefined) body.global_footer = v.global_footer;
       if (v.max_message_chars !== undefined) body.max_message_chars = v.max_message_chars;
-      if (v.feedback_webhook !== undefined) body.feedback_webhook = v.feedback_webhook;
+      if (String(v.feedback_webhook || "").trim()) body.feedback_webhook = String(v.feedback_webhook).trim();
       if (form.querySelector('[data-tg="signature_enabled"]')) body.signature_enabled = tgVal(form, "signature_enabled");
       await api("/api/settings", { method: "PATCH", body: body });
       toast(t("settings.saved"), "ok");
@@ -2142,9 +2302,44 @@
       return;
     }
     if (kind === "feedback") {
-      await api("/api/feedback", { method: "POST", body: { kind: "message", name: v.name || "", contact: v.contact || "", message: v.message || "" } });
+      const result = await api("/api/feedback", { method: "POST", body: { kind: "message", name: v.name || "", contact: v.contact || "", message: v.message || "" } });
       form.reset();
-      toast(t("creators.sent"), "ok");
+      const delivery = result.telegram || {};
+      if (delivery.status === "sent") {
+        toast(t("creators.feedbackSentAll"), "ok");
+      } else if (delivery.status === "partial") {
+        toast(t("creators.feedbackPartial", { sent: num(delivery.sent), total: num(delivery.total) }), "info");
+      } else if (delivery.status === "not_configured") {
+        toast(t("creators.feedbackNotConfigured"), "err");
+      } else {
+        toast(t("creators.feedbackFailed"), "err");
+      }
+      return;
+    }
+    if (kind === "creator-login") {
+      const username = (form.elements.username && form.elements.username.value || "").trim();
+      const password = form.elements.password ? form.elements.password.value : "";
+      await api("/api/creators/auth/login", { method: "POST", body: { username: username, password: password } });
+      if (form.elements.password) form.elements.password.value = "";
+      closeModal();
+      toast(t("creators.editorSignedIn"), "ok");
+      await render();
+      return;
+    }
+    if (kind === "creator-contact-token") {
+      const result = await api("/api/creators/contact-bot", { method: "PUT", body: { bot_token: v.bot_token || "" } });
+      S.creatorEditor.botConfigured = Boolean(result.configured);
+      closeModal();
+      toast(t("creators.contactBotSaved"), "ok");
+      await render();
+      return;
+    }
+    if (kind === "creator-edu") {
+      const body = {};
+      Object.keys(v).forEach((key) => { if (key.indexOf("edu_") === 0) body[key] = v[key]; });
+      const result = await api("/api/creators", { method: "PATCH", body: body });
+      S.edu = result.edu || S.edu;
+      closeModal(); toast(t("common.ok"), "ok"); await render();
       return;
     }
     if (kind === "creator") {
@@ -2200,6 +2395,26 @@
       await render();
       if (last) showReport(last);
     },
+    "analyzer.ai.provider": async (el) => {
+      const base = $("#analysisApiBase");
+      const model = $("#analysisApiModel");
+      if (el.value === "deepseek") {
+        if (base) base.value = "https://api.deepseek.com";
+        if (model && !model.value.startsWith("deepseek-")) model.value = "deepseek-flash";
+      } else if (base && base.value.includes("api.deepseek.com")) {
+        base.value = "https://api.openai.com/v1";
+        if (model && model.value.startsWith("deepseek-")) model.value = "gpt-4o-mini";
+      }
+      if (( $("#analysisApiKey") || {}).value) await discoverAnalyzerModels();
+    },
+    "analyzer.ai.keychange": async (el) => {
+      if (String(el.value || "").trim()) await discoverAnalyzerModels();
+    },
+    "analyzer.ai.basechange": async () => {
+      const key = $("#analysisApiKey");
+      if (key && String(key.value || "").trim()) await discoverAnalyzerModels();
+    },
+    "analyzer.ai.models": async () => { await discoverAnalyzerModels(); },
     "analyzer.ai.save": async () => {
       try {
         await saveAnalyzerAiSettings();
@@ -2214,7 +2429,7 @@
         await saveAnalyzerAiSettings();
         const result = await api("/api/analyzer/llm/test", { method: "POST" });
         if (result.ok) toast(t("an.aiTestOk", { model: result.model || "" }), "ok");
-        else toast(t("an.aiTestFail", { detail: result.error || "unknown" }), "err");
+        else toast(t("an.aiTestFail", { detail: analyzerApiErrorText(result.error || "unknown") }), "err");
       } catch (error) { toast(errMsg(error), "err"); }
       finally { if (el.isConnected) { el.disabled = false; el.innerHTML = old; } }
     },
@@ -2592,6 +2807,16 @@
     },
 
     /* creators / feedback */
+    "creator.login": () => creatorLoginModal(),
+    "creator.edit": (el) => creatorModal(Number(el.dataset.slot)),
+    "creator.editEducation": () => creatorEducationModal(),
+    "creator.contactBot": () => creatorContactBotModal(),
+    "creator.logout": async () => {
+      await api("/api/creators/auth/logout", { method: "POST" });
+      S.creatorEditor = { configured: true, authenticated: false, botConfigured: false };
+      toast(t("creators.editorLogout"), "ok");
+      await render();
+    },
     "creators.copy": async (el) => {
       const value = el.dataset.copy || "";
       try {
@@ -2691,7 +2916,7 @@
     S.theme = ["slate", "cyber", "emerald", "amber"].includes(storedTheme)
       ? storedTheme : ((meta.defaults && meta.defaults.theme) || "slate");
 
-    const version = "v" + (meta.version || "1.06");
+    const version = "v" + (meta.version || "1.08");
     const badge = $("#verBadge");
     const footer = $("#verFoot");
     if (badge) badge.textContent = version;

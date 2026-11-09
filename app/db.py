@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_agent TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS creator_sessions (
+    token        TEXT PRIMARY KEY,
+    creator_slot INTEGER NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    user_agent   TEXT DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS topics (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -293,6 +301,7 @@ DEFAULT_SETTINGS = {
     "openai_model": "gpt-4o-mini",
     "openai_api_key": "",
     # dedicated media analysis (OpenAI-compatible chat-completions API)
+    "analysis_api_provider": "openai_compatible",
     "analysis_api_base_url": "https://api.openai.com/v1",
     "analysis_api_model": "gpt-4o-mini",
     "analysis_api_key": "",

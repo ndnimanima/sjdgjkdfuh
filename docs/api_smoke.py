@@ -8,6 +8,7 @@ No external feed, translation, or messaging service is contacted.
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import tempfile
 from pathlib import Path
@@ -38,10 +39,10 @@ def main() -> None:
         with TestClient(app, base_url="http://testserver") as client:
             health = client.get("/healthz")
             check("health endpoint", health.status_code == 200 and health.json().get("ok") is True)
-            check("health version", health.json().get("version") == "1.06")
+            check("health version", health.json().get("version") == "1.08")
 
             meta = client.get("/api/meta")
-            check("public metadata", meta.status_code == 200 and meta.json().get("version") == "1.06")
+            check("public metadata", meta.status_code == 200 and meta.json().get("version") == "1.08")
             check("theme metadata", len(meta.json().get("themes", [])) == 4)
             check("auth protects feeds", client.get("/api/feeds").status_code == 401)
 
@@ -58,15 +59,24 @@ def main() -> None:
 
             from app import analyzer, config, db
             original_llm_chat = analyzer._llm_chat
+            original_fetch_api_models = analyzer.fetch_api_models
+            model_calls = []
+            webhook_value = "https://hooks.example/" + secrets.token_urlsafe(24)
 
             async def fake_llm_chat(base_url, model, api_key, system, user, timeout=55.0):
                 return "OK"
 
+            async def fake_fetch_api_models(base_url, api_key, timeout=20.0):
+                model_calls.append((base_url, api_key))
+                return {"ok": True, "models": ["deepseek-flash", "deepseek-v4-pro"]}
+
             analyzer._llm_chat = fake_llm_chat
+            analyzer.fetch_api_models = fake_fetch_api_models
             try:
                 configured = client.patch(
                     "/api/settings",
                     json={
+                        "analysis_api_provider": "openai_compatible",
                         "analysis_api_base_url": "https://llm.example/v1",
                         "analysis_api_model": "smoke-model",
                         "analysis_api_key": "test-analysis-secret",
@@ -74,6 +84,7 @@ def main() -> None:
                         "image_api_base_url": "https://image.example/v1",
                         "image_api_model": "smoke-image-model",
                         "image_api_key": "test-image-secret",
+                        "feedback_webhook": webhook_value,
                     },
                 )
                 public_settings = configured.json().get("settings", {})
@@ -82,27 +93,90 @@ def main() -> None:
                       and public_settings.get("image_api_key_set") is True
                       and "test-analysis-secret" not in str(public_settings)
                       and "test-image-secret" not in str(public_settings))
+                check("feedback webhook URL is masked in settings and omitted from JSON backup",
+                      public_settings.get("feedback_webhook") == ""
+                      and public_settings.get("feedback_webhook_set") is True
+                      and webhook_value not in configured.text
+                      and webhook_value not in client.get("/api/admin/export").text
+                      and "feedback_webhook" not in client.get("/api/admin/export").json().get("settings", {}))
+                client.patch("/api/settings", json={"feedback_webhook": ""})
                 llm_test = client.post("/api/analyzer/llm/test")
                 check("analyzer connection test uses configured OpenAI-compatible API", llm_test.status_code == 200
                       and llm_test.json().get("ok") is True
                       and llm_test.json().get("model") == "smoke-model")
+
+                async def failed_llm_chat(base_url, model, api_key, system, user, timeout=55.0):
+                    raise RuntimeError("llm_http_402")
+
+                analyzer._llm_chat = failed_llm_chat
+                llm_balance_error = client.post("/api/analyzer/llm/test")
+                check("analyzer test returns a bounded 402 code for localized balance guidance", llm_balance_error.status_code == 200
+                      and llm_balance_error.json().get("error") == "llm_http_402"
+                      and "test-analysis-secret" not in llm_balance_error.text)
+                analyzer._llm_chat = fake_llm_chat
+
+                discovered = client.post("/api/analyzer/models", json={
+                    "provider": "deepseek",
+                    "base_url": "https://attacker.invalid/v1",
+                    "api_key": "temporary-discovery-secret",
+                })
+                check("DeepSeek model discovery forces the official API base and never echoes the key", discovered.status_code == 200
+                      and discovered.json().get("ok") is True
+                      and discovered.json().get("models") == ["deepseek-flash", "deepseek-v4-pro"]
+                      and model_calls[-1] == ("https://api.deepseek.com", "temporary-discovery-secret")
+                      and "temporary-discovery-secret" not in discovered.text)
+
+                async def failed_model_fetch(base_url, api_key, timeout=20.0):
+                    return {"ok": False, "error": "models_http_402"}
+
+                analyzer.fetch_api_models = failed_model_fetch
+                balance_error = client.post("/api/analyzer/models", json={
+                    "provider": "deepseek", "api_key": "temporary-discovery-secret",
+                })
+                check("DeepSeek 402 model-discovery error remains key-safe", balance_error.status_code == 200
+                      and balance_error.json().get("error") == "models_http_402"
+                      and "temporary-discovery-secret" not in balance_error.text)
             finally:
                 analyzer._llm_chat = original_llm_chat
+                analyzer.fetch_api_models = original_fetch_api_models
 
             creator_before = client.get("/api/creators").json()
-            creator_patch = client.patch("/api/creators", json={"creator1_name": "Unauthorized edit"})
+            editor_state = client.get("/api/creators/auth/session")
+            creator_patch = client.patch("/api/creators", json={"creator1_name": "Admin bypass attempt"})
             creator_import = client.post(
                 "/api/admin/import",
                 json={"confirm": True, "payload": {"settings": {
                     "creator1_name": "Import bypass attempt",
                     "edu_youtube_id": "@import-bypass-attempt",
-                }}},
+                    "contact_bot_token": "import-secret-must-not-persist",
+                }, "destinations": [{
+                    "name": "Imported without credential",
+                    "platform": "telegram",
+                    "chat_id": "-1000000000001",
+                    "bot_token": "import-destination-secret-must-not-persist",
+                }]}},
             )
             creator_after = client.get("/api/creators").json()
-            check("creator/team profiles are read-only, including backup import", creator_patch.status_code == 403
-                  and creator_import.status_code == 200
+            settings_after_import = client.get("/api/settings").json().get("settings", {})
+            check("creator edits require separately configured creator authentication", editor_state.status_code == 200
+                  and editor_state.json() == {"configured": False, "authenticated": False}
+                  and creator_patch.status_code == 403
+                  and creator_patch.json().get("detail") == "creator_auth_required")
+            check("backup import cannot bypass creator-only fields or store the contact token", creator_import.status_code == 200
                   and creator_after["creators"][0]["name"] == creator_before["creators"][0]["name"]
-                  and creator_after["edu"]["youtube_id"] == creator_before["edu"]["youtube_id"])
+                  and creator_after["edu"]["youtube_id"] == creator_before["edu"]["youtube_id"]
+                  and "contact_bot_token" not in settings_after_import
+                  and db.get_setting("contact_bot_token") == "")
+            imported_destination = db.query_one(
+                "SELECT bot_token FROM destinations WHERE name = ?", ("Imported without credential",)
+            )
+            check("JSON import ignores supplied destination bot credentials",
+                  imported_destination is not None and imported_destination.get("bot_token") == "")
+            contact_not_configured = client.post("/api/feedback", json={"message": "offline smoke feedback"})
+            check("feedback reports saved-but-not-delivered when contact bot is absent", contact_not_configured.status_code == 200
+                  and contact_not_configured.json().get("saved") is True
+                  and contact_not_configured.json().get("forwarded") is False
+                  and contact_not_configured.json().get("telegram", {}).get("status") == "not_configured")
 
             invalid_image_url = client.patch("/api/settings", json={"image_api_base_url": "not a URL"})
             check("image API endpoint rejects malformed URLs", invalid_image_url.status_code == 400)
@@ -115,8 +189,23 @@ def main() -> None:
                   and media.content == b"persistent-media-smoke"
                   and str(config.GENERATED_IMAGES_DIR).startswith(tmp))
 
+            export_secret = "smoke-" + secrets.token_urlsafe(24)
+            db.execute(
+                "UPDATE destinations SET bot_token = ? WHERE name = ?",
+                (export_secret, "Imported without credential"),
+            )
             exported = client.get("/api/admin/export?include_items=0")
-            check("admin export API", exported.status_code == 200 and exported.json().get("version") == "1.06")
+            export_payload = exported.json()
+            exported_destination = next(
+                (row for row in export_payload.get("destinations", [])
+                 if row.get("name") == "Imported without credential"),
+                {},
+            )
+            check("admin JSON backup excludes contact and destination credentials", exported.status_code == 200
+                  and export_payload.get("version") == "1.08"
+                  and "contact_bot_token" not in export_payload.get("settings", {})
+                  and exported_destination.get("bot_token") == ""
+                  and export_secret not in exported.text)
 
             topic = client.post(
                 "/api/topics",

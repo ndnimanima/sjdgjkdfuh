@@ -1,4 +1,4 @@
-# Rozaneh v1.06 — deployment guide
+# Rozaneh v1.08 — deployment guide
 
 This guide covers persistent deployment of the Python application, HTTPS, first login, Cloudflare edge proxying, backups, and health checks.
 
@@ -13,7 +13,8 @@ Before exposing a panel publicly:
 3. Set `COOKIE_SECURE=1` when users access the panel over HTTPS.
 4. Keep one scheduler-enabled app instance. Multiple replicas each run their own scheduler and can duplicate sends.
 5. Use HTTPS; avoid publishing the admin port directly to the public internet without a TLS proxy.
-6. Back up `/data/rozaneh.db` and, if you use AI-generated fallback images, `/data/generated_images`. Restrict access to backups; the database contains configuration and messaging credentials.
+6. For routine credential-free backups, use `docs/safe_backup.py` for `/data/rozaneh.db`; include `/data/generated_images` separately if you use AI-generated fallback images. Raw database copies can contain other credentials, so encrypt and restrict any full disaster-recovery snapshot.
+7. If enabling creator editing, configure both distinct creator accounts through the host’s secret manager; there are no built-in creator credentials.
 
 Common production variables:
 
@@ -25,6 +26,19 @@ COOKIE_SECURE=1
 SCHEDULER_ENABLED=1
 PORT=8080
 ```
+
+### Creator-only editor and contact delivery
+
+To let only the two creators edit profiles or replace the contact-bot token, set these four values in the hosting provider’s **secret/environment settings**:
+
+- `CREATOR1_USERNAME` and `CREATOR1_PASSWORD`
+- `CREATOR2_USERNAME` and `CREATOR2_PASSWORD`
+
+Both account pairs are required, and the usernames must be distinct. Use long, unique passwords. The panel creates separate HttpOnly creator sessions; administrator login alone does not grant creator-edit rights. If the four values are missing or invalid, the editor stays disabled.
+
+`CONTACT_BOT_TOKEN` is optional at startup and should be stored only in the host’s secret settings. Creator-managed UI replacement requires `CONTACT_BOT_ENCRYPTION_KEY`, a Fernet key stored separately in the host secret manager. Generate one after installing requirements with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. The UI-managed value is encrypted before it is written to SQLite; the application never returns it, and JSON export omits it. Keep the encryption key out of SQLite, source control, release ZIPs, and database backups. A raw SQLite backup contains only ciphertext for this contact token, but may still contain other application credentials; encrypt and restrict raw database backups. If an older database contains a plaintext contact token, startup encrypts it when the key is available and otherwise discards it. Historical raw backups made before that migration may still contain plaintext credentials; treat them as exposed and rotate/revoke those credentials. If a Telegram token has been exposed, revoke it with BotFather before configuring a replacement; never put a live token, encryption key, or creator password in source control or chat.
+
+The contact form attempts delivery to both configured Telegram recipient IDs and reports full, partial, or failed delivery. Each recipient may need to start the bot before Telegram permits a private message. A failed or partial send remains recorded in the system log.
 
 ## 2. Railway
 
@@ -39,7 +53,7 @@ PORT=8080
    - `SCHEDULER_ENABLED=1`
 5. Generate a public HTTPS domain. Railway injects `PORT`; the container binds to `0.0.0.0` and uses it.
 6. Open the generated domain, sign in, then change the password in **Settings → Security**.
-7. Verify `https://YOUR-DOMAIN/healthz` returns JSON with `"ok": true` and version `1.06`.
+7. Verify `https://YOUR-DOMAIN/healthz` returns JSON with `"ok": true` and version `1.08`.
 
 `railway.toml` points Railway to the Dockerfile and health endpoint. Do not scale to multiple scheduler-enabled replicas unless you first add a distributed scheduler/locking strategy.
 
@@ -89,14 +103,14 @@ Compose creates a named volume called `rozaneh_data`. To use another host port, 
 ### Plain Docker
 
 ```bash
-docker build -t rozaneh:1.06 .
+docker build -t rozaneh:1.08 .
 docker volume create rozaneh_data
 docker run -d --name rozaneh --restart unless-stopped \
   -p 8080:8080 -v rozaneh_data:/data \
   -e DATA_DIR=/data -e PORT=8080 \
   -e ADMIN_PASSWORD='use-a-long-unique-password' \
   -e DEFAULT_TZ=Asia/Tehran -e COOKIE_SECURE=0 \
-  rozaneh:1.06
+  rozaneh:1.08
 ```
 
 For a public HTTPS deployment behind a reverse proxy, use `COOKIE_SECURE=1`; keep the app port private to the proxy when possible.
@@ -187,6 +201,8 @@ Run the offline news-summary, pipeline, and API tests first. Then use Playwright
 python docs/news_quality_smoke.py
 python docs/pipeline_quality_smoke.py
 python docs/api_smoke.py
+python docs/creator_contact_smoke.py
+python docs/backup_smoke.py
 DATA_DIR=/tmp/rozaneh-smoke python docs/smoke_ui.py
 python docs/verify_panel.py --base http://127.0.0.1:8080
 python docs/login_check.py --base http://127.0.0.1:8080 --engines chromium
@@ -196,11 +212,12 @@ The offline news tests verify extractive multi-sentence summaries, filtering of 
 
 ## 9. Backups and upgrades
 
-- Back up `/data/rozaneh.db` on a schedule, and keep backups encrypted and access-controlled.
-- The panel's JSON export is useful for configuration migration, but it is not a replacement for a full database backup.
-- Keep an off-host copy of the database before upgrades. Mount the same persistent volume after rebuilding the image.
+- For routine credential-free backups, create a scrubbed SQLite copy with `python docs/safe_backup.py /data/rozaneh.db /secure/backups/rozaneh-sanitized.sqlite3`. It removes stored provider/contact secrets, destination bot tokens, and active admin/creator sessions while retaining content and ordinary settings; re-enter credentials and sign in again after restoring it. The script leaves the live database untouched and writes the output with owner-only permissions.
+- The panel's JSON export is also credential-free: protected settings are omitted, destination bot-token fields are blank, and imports ignore supplied credential fields. Re-enter destination credentials after restoring that JSON.
+- A byte-for-byte/raw database snapshot is a separate full disaster-recovery artifact and can still contain other application credentials. If you choose that option, encrypt it, restrict access, and keep `CONTACT_BOT_ENCRYPTION_KEY` outside the backup. The contact token itself is encrypted in SQLite. Raw snapshots and sanitized backups must never be uploaded to source control or included in a release ZIP.
+- Keep an off-host copy of the sanitized database before upgrades. Mount the same persistent volume after rebuilding the image.
 - Make sure only one active app instance runs the scheduler while testing upgrades.
-- Do not commit `.env`, SQLite files, translation keys, bot tokens, or exported backups. `.gitignore` excludes local runtime data.
+- Do not commit `.env`, SQLite files, translation keys, bot tokens, encryption keys, or exported backups. `.gitignore` excludes local runtime data.
 
 ## 10. Troubleshooting
 
