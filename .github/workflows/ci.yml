@@ -53,5 +53,20 @@ jobs:
       - name: Run isolated API smoke test
         run: python docs/api_smoke.py
 
+      - name: Test Persian dates and article extraction
+        run: python docs/date_parser_smoke.py
+
+      - name: Test opt-in image-generation fallback (mock API)
+        run: python docs/imagegen_smoke.py
+
+      - name: Test source-grounded news summaries
+        run: python docs/news_quality_smoke.py
+
+      - name: Test pipeline quality and Telegram caption sizing
+        run: python docs/pipeline_quality_smoke.py
+
+      - name: Test photo-aware resend behavior
+        run: python docs/pipeline_delivery_smoke.py
+
       - name: Build Docker image
         run: docker build --tag rozaneh:ci .
